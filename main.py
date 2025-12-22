@@ -6,8 +6,7 @@
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from contextlib import asynccontextmanager
 import os
 import json
@@ -289,4 +288,5 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
 if __name__ == "__main__":
     import uvicorn
     # reload=True es útil mientras desarrollas para ver cambios en vivo
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
