@@ -6,7 +6,7 @@
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
+import google.generativeai as genai # Librería Estándar
 from contextlib import asynccontextmanager
 import os
 import json
@@ -26,16 +26,21 @@ from sklearn.naive_bayes import MultinomialNB
 # 1. CARGA DE SECRETOS (SEGURIDAD)
 load_dotenv() # Lee el archivo .env
 
-API_KEY_GOOGLE = os.getenv('GEMINI_API_KEY')
+API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY') # Asegúrate que en Render se llame GOOGLE_API_KEY
 APP_PASSWORD = os.getenv('MI_APP_PASSWORD') # Tu contraseña maestra
 
-# ✅ CORRECCIÓN CRÍTICA: Cambiado a 1.5-flash para evitar tu error de cuota
+# ✅ CONFIGURACIÓN GEMINI (Sintaxis Estándar)
+if API_KEY_GOOGLE:
+    genai.configure(api_key=API_KEY_GOOGLE)
+else:
+    print("❌ ALERTA: No se encontró la API KEY de Google.")
+
+# Usamos 2.5-flash porque es el más rápido y ligero para Render gratuito
 MODELO_IA = "gemini-2.5-flash" 
 DB_NAME = "cerebro_whatsapp.db"
 
 # Variables Globales
 nlp = None
-client = None
 embedder = None   # Lazy Loading (Se mantiene para velocidad)
 clf_urgencia = None
 vectorizer = None
@@ -45,6 +50,10 @@ header_scheme = APIKeyHeader(name="x-api-key")
 
 async def verificar_llave(api_key: str = Depends(header_scheme)):
     """Si la llave no coincide con el .env, bloquea la entrada."""
+    # Si no hay contraseña configurada en .env, dejamos pasar (Modo pruebas)
+    if not APP_PASSWORD:
+        return api_key
+        
     if api_key != APP_PASSWORD:
         print(f"⛔ ALERTA: Acceso denegado. Clave usada incorrecta.")
         raise HTTPException(
@@ -68,10 +77,18 @@ print("🚀 Iniciando Sistema v14 (Blindado y Veloz)...")
 
 # A. spaCy (Necesario para analizar archivos)
 try:
+    # Intentamos cargar el pequeño, si falla, lo descargamos
     nlp = spacy.load("es_core_news_sm")
     print("✅ NLP Local: LISTO")
 except:
-    print("⚠️ NLP: Modelo no encontrado (funcionará básico).")
+    print("⚠️ NLP: Modelo no encontrado, intentando descargar...")
+    import spacy.cli
+    spacy.cli.download("es_core_news_sm")
+    try:
+        nlp = spacy.load("es_core_news_sm")
+        print("✅ NLP Local: Descargado y LISTO")
+    except:
+        print("❌ ERROR CRÍTICO: No se pudo cargar Spacy.")
 
 # B. Detector de Urgencia (ML Ligero)
 try:
@@ -91,13 +108,6 @@ try:
 except Exception as e:
     print(f"⚠️ ML Urgencia omitido: {e}")
 
-# C. Cliente Gemini
-if API_KEY_GOOGLE:
-    try:
-        client = genai.Client(api_key=API_KEY_GOOGLE)
-        print(f"✅ Motor IA ({MODELO_IA}): CONECTADO")
-    except:
-        print("❌ Error API Key Gemini")
 
 # --- BASE DE DATOS ---
 def init_db():
@@ -223,28 +233,33 @@ async def chat_endpoint(entrada: MensajeEntrada):
     """
     
     try:
-        response = client.models.generate_content(model=MODELO_IA, contents=prompt)
+        # CORRECCIÓN: Sintaxis estándar
+        model = genai.GenerativeModel(MODELO_IA)
+        response = model.generate_content(prompt)
         return {"respuesta": f"{prefijo}{response.text}", "modo": "Profundo" if entrada.modo_profundo else "Rápido"}
     except Exception as e:
         return {"respuesta": f"Error: {str(e)}"}
 
-# 🔒 ENDPOINT 2: ANÁLISIS DE ARCHIVOS BLINDADO (Tu código original + Seguridad)
+# 🔒 ENDPOINT 2: ANÁLISIS DE ARCHIVOS BLINDADO
 @app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
 async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexar_para_busqueda: bool = True):
     texto_acumulado = ""
     partes_para_gemini = []
     
     try:
-        # Lectura de archivos (Tu lógica intacta)
+        # Lectura de archivos
         for archivo in files:
             contenido = await archivo.read()
             mime = detectar_mime_real(archivo.filename, archivo.content_type)
-            if "text" in mime:
+            
+            if "text" in mime or "json" in mime:
                 txt = contenido.decode('utf-8', errors='ignore')
                 texto_acumulado += txt + "\n"
                 partes_para_gemini.append(f"\n--- DOC ({archivo.filename}) ---\n{txt}\n")
             else:
-                partes_para_gemini.append(types.Part.from_bytes(data=contenido, mime_type=mime))
+                # CORRECCIÓN: Formato de diccionario para la librería estándar
+                blob = {"mime_type": mime, "data": contenido}
+                partes_para_gemini.append(blob)
 
         # Motores locales
         datos_spacy = analizar_texto_con_spacy(texto_acumulado[:50000])
@@ -264,12 +279,18 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
         """
         partes_para_gemini.insert(0, prompt_sistema)
         
-        response = client.models.generate_content(
-            model=MODELO_IA, 
-            contents=partes_para_gemini, 
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+        # CORRECCIÓN: Configuración y llamada estándar
+        model = genai.GenerativeModel(MODELO_IA)
+        configuracion = genai.GenerationConfig(response_mime_type="application/json")
+        
+        response = model.generate_content(
+            partes_para_gemini, 
+            generation_config=configuracion
         )
-        resultado = json.loads(response.text.replace("```json", "").replace("```", ""))
+        
+        # Limpieza del JSON
+        texto_limpio = response.text.replace("```json", "").replace("```", "")
+        resultado = json.loads(texto_limpio)
 
         guardar_en_db(
             resultado['ASISTENTE_ACTIVO']['resumen_rapido'], 
@@ -287,7 +308,4 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
 
 if __name__ == "__main__":
     import uvicorn
-    # reload=True es útil mientras desarrollas para ver cambios en vivo
-
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
+    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
