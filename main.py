@@ -1,18 +1,19 @@
 # ====================================================
-# WHATSAPP IA 14.0 - SEGURIDAD TOTAL (.ENV + API KEY)
-# Base: v13.5 (Velocidad + Archivos) + Blindaje
+# WHATSAPP IA 15.0 - CEREBRO EN LA NUBE (SUPABASE)
+# Base: v14.0 + Persistencia Real + Eliminación de SQLite
 # ====================================================
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai # Librería Estándar
+import google.generativeai as genai
 from contextlib import asynccontextmanager
 import os
 import json
 import mimetypes
 import spacy
-import sqlite3
+# import sqlite3  <-- ELIMINADO: Ya no usamos base de datos local
+from supabase import create_client, Client # <-- NUEVO: Cliente de Supabase
 import numpy as np 
 from datetime import datetime
 from dotenv import load_dotenv
@@ -26,22 +27,36 @@ from sklearn.naive_bayes import MultinomialNB
 # 1. CARGA DE SECRETOS (SEGURIDAD)
 load_dotenv() # Lee el archivo .env
 
-API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY') # Asegúrate que en Render se llame GOOGLE_API_KEY
-APP_PASSWORD = os.getenv('MI_APP_PASSWORD') # Tu contraseña maestra
+API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY')
+APP_PASSWORD = os.getenv('MI_APP_PASSWORD') 
 
-# ✅ CONFIGURACIÓN GEMINI (Sintaxis Estándar)
+# --- NUEVAS VARIABLES PARA SUPABASE ---
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+
+# ✅ CONFIGURACIÓN GEMINI
 if API_KEY_GOOGLE:
     genai.configure(api_key=API_KEY_GOOGLE)
 else:
     print("❌ ALERTA: No se encontró la API KEY de Google.")
 
-# Usamos 2.5-flash porque es el más rápido y ligero para Render gratuito
-MODELO_IA = "gemini-2.5-flash" 
-DB_NAME = "cerebro_whatsapp.db"
+# ✅ CONEXIÓN A SUPABASE (El Cerebro Eterno)
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase: CONECTADO")
+    except Exception as e:
+        print(f"❌ Error conectando a Supabase: {e}")
+        supabase = None
+else:
+    print("⚠️ ALERTA: Faltan credenciales de SUPABASE en el archivo .env")
+    supabase = None
+
+# Usamos 1.5-flash (Versión estable actual más rápida)
+MODELO_IA = "gemini-1.5-flash" 
 
 # Variables Globales
 nlp = None
-embedder = None   # Lazy Loading (Se mantiene para velocidad)
 clf_urgencia = None
 vectorizer = None
 
@@ -50,7 +65,6 @@ header_scheme = APIKeyHeader(name="x-api-key")
 
 async def verificar_llave(api_key: str = Depends(header_scheme)):
     """Si la llave no coincide con el .env, bloquea la entrada."""
-    # Si no hay contraseña configurada en .env, dejamos pasar (Modo pruebas)
     if not APP_PASSWORD:
         return api_key
         
@@ -62,22 +76,11 @@ async def verificar_llave(api_key: str = Depends(header_scheme)):
         )
     return api_key
 
-# --- FUNCIÓN DE CARGA DIFERIDA (VELOCIDAD) ---
-def obtener_motor_vectorial():
-    """Solo carga la IA pesada si realmente se necesita."""
-    global embedder
-    if embedder is None:
-        print("🐢 Cargando motor de memoria profunda (SentenceTransformer)...")
-        from sentence_transformers import SentenceTransformer
-        embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    return embedder
-
 # --- CARGA AL INICIO ---
-print("🚀 Iniciando Sistema v14 (Blindado y Veloz)...")
+print("🚀 Iniciando Sistema v15 (Nube + IA)...")
 
-# A. spaCy (Necesario para analizar archivos)
+# A. spaCy
 try:
-    # Intentamos cargar el pequeño, si falla, lo descargamos
     nlp = spacy.load("es_core_news_sm")
     print("✅ NLP Local: LISTO")
 except:
@@ -109,37 +112,35 @@ except Exception as e:
     print(f"⚠️ ML Urgencia omitido: {e}")
 
 
-# --- BASE DE DATOS ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS analisis (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, resumen TEXT, 
-        personas TEXT, lugares TEXT, json_completo TEXT, embedding TEXT, urgencia TEXT)''')
-    try: c.execute("ALTER TABLE analisis ADD COLUMN embedding TEXT"); 
-    except: pass
-    try: c.execute("ALTER TABLE analisis ADD COLUMN urgencia TEXT"); 
-    except: pass
-    conn.commit()
-    conn.close()
+# --- BASE DE DATOS (REEMPLAZADA POR SUPABASE) ---
+# La función init_db ya no es necesaria porque la tabla está en la nube.
 
 def guardar_en_db(resumen, personas, lugares, json_data, urgencia, generar_vector):
-    vector_json = "[]"
-    if generar_vector:
-        motor = obtener_motor_vectorial() # Lazy Load
-        if motor:
-            vector = motor.encode(resumen)
-            vector_json = json.dumps(vector.tolist())
+    """Guarda análisis en Supabase (Persistencia Real)"""
+    if not supabase:
+        print("⚠️ No hay conexión a Supabase. Datos no guardados.")
+        return
 
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''INSERT INTO analisis (fecha, resumen, personas, lugares, json_completo, embedding, urgencia)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)''', 
-              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), resumen, 
-               json.dumps(personas), json.dumps(lugares), json.dumps(json_data), 
-               vector_json, urgencia))
-    conn.commit()
-    conn.close()
+    try:
+        # ID genérico para MVP. En el futuro usaremos el número de teléfono real.
+        usuario_id = "00000000-0000-0000-0000-000000000000"
+        
+        # Preparar datos para insertar
+        datos_conversacion = {
+            'usuario_id': usuario_id,
+            'resumen': resumen,
+            'urgencia': urgencia,
+            'metadata': json_data, # Guardamos todo el JSON del análisis
+            'participantes': {'personas': personas, 'lugares': lugares},
+            'plataforma': 'app_manual'
+        }
+        
+        # Insertar en Supabase
+        resultado = supabase.table('conversaciones').insert(datos_conversacion).execute()
+        print(f"✅ Guardado en Supabase exitosamente.")
+            
+    except Exception as e:
+        print(f"❌ Error guardando en Supabase: {e}")
 
 # --- UTILIDADES ---
 def predecir_urgencia_ml(texto: str) -> str:
@@ -165,42 +166,41 @@ def analizar_texto_con_spacy(texto: str) -> Dict:
             datos["lugares"].append(ent.text)
     return datos
 
-# --- BUSQUEDA ---
-def busqueda_profunda_inteligente(pregunta: str):
-    motor = obtener_motor_vectorial() # Lazy Load
-    if not motor: return "Motor no disponible."
-    
-    from sklearn.metrics.pairwise import cosine_similarity
-    vector_pregunta = motor.encode(pregunta).reshape(1, -1)
-    
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT resumen, embedding, urgencia FROM analisis WHERE length(embedding) > 5')
-    filas = c.fetchall()
-    conn.close()
-    
-    if not filas: return "Sin memoria profunda."
-    
-    scores = []
-    for r, emb, u in filas:
-        try:
-            emb_db = np.array(json.loads(emb)).reshape(1, -1)
-            sim = cosine_similarity(vector_pregunta, emb_db)[0][0]
-            scores.append((sim, r, u))
-        except: pass
-        
-    scores.sort(key=lambda x: x[0], reverse=True)
-    relevantes = [f"{'🚨' if u=='ALTA' else '📄'} {r}" for s, r, u in scores if s > 0.35]
-    return "\n".join(relevantes[:3]) if relevantes else "Sin coincidencias relevantes."
+# --- BUSQUEDA INTELIGENTE (AHORA EN SUPABASE) ---
+def busqueda_profunda_inteligente(pregunta: str, usuario_id: str = None):
+    """Búsqueda en memoria histórica usando Supabase"""
+    if not supabase: return "Sin conexión a memoria."
 
-# --- API (CON SEGURIDAD) ---
+    try:
+        if not usuario_id:
+            usuario_id = "00000000-0000-0000-0000-000000000000"
+        
+        # Búsqueda de los últimos 3 análisis relevantes (Por ahora cronológico)
+        # En el futuro activaremos pgvector para búsqueda semántica real.
+        resultado = supabase.table('conversaciones')\
+            .select('resumen, urgencia')\
+            .eq('usuario_id', usuario_id)\
+            .order('created_at', desc=True)\
+            .limit(3)\
+            .execute()
+        
+        if not resultado.data:
+            return "Sin memoria previa."
+        
+        relevantes = [f"{'🚨' if r['urgencia']=='ALTA' else '📄'} {r['resumen']}" 
+                      for r in resultado.data]
+        return "\n".join(relevantes)
+            
+    except Exception as e:
+        print(f"Error en búsqueda: {e}")
+        return "Error consultando memoria."
+
+# --- API ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    print("\n🔐 SERVIDOR V14 SEGURO - ESPERANDO CONEXIONES AUTORIZADAS")
+    print("\n🔐 SERVIDOR V15 (SUPABASE) - LISTO")
     yield
 
-# Docs ocultos para seguridad
 app = FastAPI(title="WhatsApp IA Secure", lifespan=lifespan, docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -215,30 +215,38 @@ async def chat_endpoint(entrada: MensajeEntrada):
     prefijo = "🚨 [URGENTE] " if urgencia == "ALTA" else ""
     
     contexto = ""
-    if entrada.modo_profundo:
-        contexto = busqueda_profunda_inteligente(entrada.mensaje)
-    else:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute('SELECT resumen FROM analisis ORDER BY id DESC LIMIT 2')
-        filas = c.fetchall()
-        conn.close()
-        if filas: contexto = "\n".join([f"- {f[0]}" for f in filas])
+    # Si activamos modo profundo o modo normal, siempre intentamos traer algo de memoria
+    try:
+        # Traer contexto de Supabase (Últimos 2 eventos)
+        if supabase:
+            resultado = supabase.table('conversaciones')\
+                .select('resumen')\
+                .order('created_at', desc=True)\
+                .limit(2)\
+                .execute()
+            
+            if resultado.data:
+                contexto = "\n".join([f"- {r['resumen']}" for r in resultado.data])
+    except Exception as e:
+        print(f"Error leyendo contexto: {e}")
 
     prompt = f"""
-    [SISTEMA] Urgencia: {urgencia}
-    [MEMORIA] {contexto}
-    [USUARIO] {entrada.mensaje}
-    Responde directo, breve y útil.
+    [SISTEMA] Urgencia detectada: {urgencia}
+    [MEMORIA RECIENTE] 
+    {contexto}
+    
+    [USUARIO DICE] 
+    {entrada.mensaje}
+    
+    Responde de forma útil, profesional y directa.
     """
     
     try:
-        # CORRECCIÓN: Sintaxis estándar
         model = genai.GenerativeModel(MODELO_IA)
         response = model.generate_content(prompt)
-        return {"respuesta": f"{prefijo}{response.text}", "modo": "Profundo" if entrada.modo_profundo else "Rápido"}
+        return {"respuesta": f"{prefijo}{response.text}", "modo": "Nube/Supabase"}
     except Exception as e:
-        return {"respuesta": f"Error: {str(e)}"}
+        return {"respuesta": f"Error IA: {str(e)}"}
 
 # 🔒 ENDPOINT 2: ANÁLISIS DE ARCHIVOS BLINDADO
 @app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
@@ -257,7 +265,6 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
                 texto_acumulado += txt + "\n"
                 partes_para_gemini.append(f"\n--- DOC ({archivo.filename}) ---\n{txt}\n")
             else:
-                # CORRECCIÓN: Formato de diccionario para la librería estándar
                 blob = {"mime_type": mime, "data": contenido}
                 partes_para_gemini.append(blob)
 
@@ -266,20 +273,22 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
         urgencia_global = predecir_urgencia_ml(texto_acumulado[:1000])
 
         prompt_sistema = f"""
-        Actúa como Analista. Entidades: {', '.join(datos_spacy['personas'])}
-        Urgencia: {urgencia_global}
-        Responde JSON exacto:
+        Actúa como Analista de Negocios y Asistente Personal.
+        Entidades detectadas: {', '.join(datos_spacy['personas'])}
+        Urgencia pre-calculada: {urgencia_global}
+        
+        Analiza el contenido y devuelve un JSON con esta estructura exacta:
         {{
             "ASISTENTE_ACTIVO": {{
-                "resumen_rapido": "Resumen ejecutivo.",
-                "alertas_urgentes": ["Alertas"],
-                "nivel_riesgo": "{urgencia_global}"
+                "resumen_rapido": "Un resumen breve de lo que trata el archivo.",
+                "alertas_urgentes": ["Lista de cosas que requieren acción inmediata"],
+                "nivel_riesgo": "{urgencia_global}",
+                "tipo": "venta/reclamo/personal/otro"
             }}
         }}
         """
         partes_para_gemini.insert(0, prompt_sistema)
         
-        # CORRECCIÓN: Configuración y llamada estándar
         model = genai.GenerativeModel(MODELO_IA)
         configuracion = genai.GenerationConfig(response_mime_type="application/json")
         
@@ -288,10 +297,10 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
             generation_config=configuracion
         )
         
-        # Limpieza del JSON
         texto_limpio = response.text.replace("```json", "").replace("```", "")
         resultado = json.loads(texto_limpio)
 
+        # GUARDAR EN SUPABASE
         guardar_en_db(
             resultado['ASISTENTE_ACTIVO']['resumen_rapido'], 
             datos_spacy['personas'], 
@@ -305,6 +314,16 @@ async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexa
     except Exception as e:
         print(f"❌ Error: {e}")
         return {"status": "error", "data": {"error": str(e)}}
+
+# 🔒 ENDPOINT 3: WEBHOOK (PREPARADO PARA WHATSAPP AUTOMÁTICO)
+@app.post("/webhook")
+async def webhook_whatsapp(payload: Dict):
+    """
+    Aquí recibiremos los mensajes de Evolution API en el futuro.
+    Por ahora solo confirma que recibió la señal.
+    """
+    print("📩 Webhook recibido:", payload)
+    return {"status": "recibido"}
 
 if __name__ == "__main__":
     import uvicorn
