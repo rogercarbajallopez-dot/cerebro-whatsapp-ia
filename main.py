@@ -68,7 +68,7 @@ print("🚀 Iniciando Sistema v14 (Blindado y Veloz)...")
 
 # A. spaCy (Necesario para analizar archivos)
 try:
-    nlp = spacy.load("es_core_news_lg")
+    nlp = spacy.load("es_core_news_sm")
     print("✅ NLP Local: LISTO")
 except:
     print("⚠️ NLP: Modelo no encontrado (funcionará básico).")
@@ -290,3 +290,4 @@ if __name__ == "__main__":
     # reload=True es útil mientras desarrollas para ver cambios en vivo
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
