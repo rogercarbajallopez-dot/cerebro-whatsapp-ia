@@ -53,7 +53,7 @@ else:
     supabase = None
 
 # Usamos 1.5-flash (Versión estable actual más rápida)
-MODELO_IA = "gemini-1.5-flash" 
+MODELO_IA = "gemini-2.5-flash" 
 
 # Variables Globales
 nlp = None
