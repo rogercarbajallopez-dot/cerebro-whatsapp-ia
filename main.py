@@ -32,7 +32,7 @@ if API_KEY_GOOGLE:
 else:
     print("❌ ALERTA: No se encontró la API KEY de Google.")
 
-MODELO_IA = "gemini-1.5-flash" 
+MODELO_IA = "gemini-2.5-flash" 
 
 # Conexión Supabase
 supabase: Client = None
@@ -313,3 +313,4 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
