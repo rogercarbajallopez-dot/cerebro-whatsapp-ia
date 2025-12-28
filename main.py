@@ -1,9 +1,9 @@
 # ====================================================
-# WHATSAPP IA 15.0 - CEREBRO EN LA NUBE (SUPABASE)
-# Base: v14.0 + Persistencia Real + Eliminación de SQLite
+# WHATSAPP IA 17.0 - MOTOR DE INTELIGENCIA CENTRAL
+# Arquitectura: Clasificación de Intenciones + Gestión de Alertas
 # ====================================================
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
@@ -12,317 +12,342 @@ import os
 import json
 import mimetypes
 import spacy
-# import sqlite3  <-- ELIMINADO: Ya no usamos base de datos local
-from supabase import create_client, Client # <-- NUEVO: Cliente de Supabase
-import numpy as np 
+from supabase import create_client, Client
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 
-# --- LIBRERÍAS LIGERAS (Carga rápida) ---
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.naive_bayes import MultinomialNB
-
-# 1. CARGA DE SECRETOS (SEGURIDAD)
-load_dotenv() # Lee el archivo .env
-
+# 1. CARGA DE SECRETOS
+load_dotenv()
 API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY')
 APP_PASSWORD = os.getenv('MI_APP_PASSWORD') 
-
-# --- NUEVAS VARIABLES PARA SUPABASE ---
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
-# ✅ CONFIGURACIÓN GEMINI
-if API_KEY_GOOGLE:
+# Configuración IA
+if API_KEY_GOOGLE: 
     genai.configure(api_key=API_KEY_GOOGLE)
 else:
     print("❌ ALERTA: No se encontró la API KEY de Google.")
 
-# ✅ CONEXIÓN A SUPABASE (El Cerebro Eterno)
+MODELO_IA = "gemini-1.5-flash" 
+
+# Conexión Supabase
+supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         print("✅ Supabase: CONECTADO")
     except Exception as e:
-        print(f"❌ Error conectando a Supabase: {e}")
-        supabase = None
-else:
-    print("⚠️ ALERTA: Faltan credenciales de SUPABASE en el archivo .env")
-    supabase = None
-
-# Usamos 1.5-flash (Versión estable actual más rápida)
-MODELO_IA = "gemini-2.5-flash" 
+        print(f"❌ Error Supabase: {e}")
 
 # Variables Globales
 nlp = None
-clf_urgencia = None
-vectorizer = None
-
-# --- SEGURIDAD: EL GUARDIA DE LA PUERTA ---
 header_scheme = APIKeyHeader(name="x-api-key") 
 
-async def verificar_llave(api_key: str = Depends(header_scheme)):
-    """Si la llave no coincide con el .env, bloquea la entrada."""
-    if not APP_PASSWORD:
-        return api_key
-        
-    if api_key != APP_PASSWORD:
-        print(f"⛔ ALERTA: Acceso denegado. Clave usada incorrecta.")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso Denegado: Contraseña incorrecta."
-        )
-    return api_key
+# ID DE USUARIO POR DEFECTO (MVP)
+USUARIO_ID_MVP = "00000000-0000-0000-0000-000000000000"
 
-# --- CARGA AL INICIO ---
-print("🚀 Iniciando Sistema v15 (Nube + IA)...")
-
-# A. spaCy
-try:
-    nlp = spacy.load("es_core_news_sm")
-    print("✅ NLP Local: LISTO")
-except:
-    print("⚠️ NLP: Modelo no encontrado, intentando descargar...")
-    import spacy.cli
-    spacy.cli.download("es_core_news_sm")
-    try:
-        nlp = spacy.load("es_core_news_sm")
-        print("✅ NLP Local: Descargado y LISTO")
-    except:
-        print("❌ ERROR CRÍTICO: No se pudo cargar Spacy.")
-
-# B. Detector de Urgencia (ML Ligero)
-try:
-    print("⚙️ Calibrando seguridad...")
-    datos_entrenamiento = [
-        ("urgente", "ALTA"), ("ayuda", "ALTA"), ("emergencia", "ALTA"),
-        ("error critico", "ALTA"), ("para ya", "ALTA"), ("plazo vence", "ALTA"),
-        ("hola", "BAJA"), ("buenos dias", "BAJA"), ("informe", "BAJA"),
-        ("gracias", "BAJA"), ("reunion", "BAJA"), ("todo bien", "BAJA")
-    ]
-    vectorizer = CountVectorizer()
-    X_train = vectorizer.fit_transform([t[0] for t in datos_entrenamiento])
-    y_train = [t[1] for t in datos_entrenamiento]
-    clf_urgencia = MultinomialNB()
-    clf_urgencia.fit(X_train, y_train)
-    print("✅ Detector Urgencia: LISTO")
-except Exception as e:
-    print(f"⚠️ ML Urgencia omitido: {e}")
-
-
-# --- BASE DE DATOS (REEMPLAZADA POR SUPABASE) ---
-# La función init_db ya no es necesaria porque la tabla está en la nube.
-
-def guardar_en_db(resumen, personas, lugares, json_data, urgencia, generar_vector):
-    """Guarda análisis en Supabase (Persistencia Real)"""
-    if not supabase:
-        print("⚠️ No hay conexión a Supabase. Datos no guardados.")
-        return
-
-    try:
-        # ID genérico para MVP. En el futuro usaremos el número de teléfono real.
-        usuario_id = "00000000-0000-0000-0000-000000000000"
-        
-        # Preparar datos para insertar
-        datos_conversacion = {
-            'usuario_id': usuario_id,
-            'resumen': resumen,
-            'urgencia': urgencia,
-            'metadata': json_data, # Guardamos todo el JSON del análisis
-            'participantes': {'personas': personas, 'lugares': lugares},
-            'plataforma': 'app_manual'
-        }
-        
-        # Insertar en Supabase
-        resultado = supabase.table('conversaciones').insert(datos_conversacion).execute()
-        print(f"✅ Guardado en Supabase exitosamente.")
-            
-    except Exception as e:
-        print(f"❌ Error guardando en Supabase: {e}")
-
-# --- UTILIDADES ---
-def predecir_urgencia_ml(texto: str) -> str:
-    if not clf_urgencia or not texto or len(texto) < 3: return "BAJA"
-    try: return clf_urgencia.predict(vectorizer.transform([texto.lower()]))[0]
-    except: return "BAJA"
-
-def detectar_mime_real(nombre: str, mime: str) -> str:
-    nombre = nombre.lower()
-    if nombre.endswith('.opus'): return 'audio/ogg'
-    if nombre.endswith('.mp3'): return 'audio/mp3'
-    if nombre.endswith('.txt'): return 'text/plain'
-    return mimetypes.guess_type(nombre)[0] or mime
-
-def analizar_texto_con_spacy(texto: str) -> Dict:
-    if not nlp: return {"personas": [], "lugares": []}
-    doc = nlp(texto)
-    datos = {"personas": [], "lugares": []}
-    for ent in doc.ents:
-        if ent.label_ == "PER" and ent.text not in datos["personas"]:
-            datos["personas"].append(ent.text)
-        elif ent.label_ == "LOC" and ent.text not in datos["lugares"]:
-            datos["lugares"].append(ent.text)
-    return datos
-
-# --- BUSQUEDA INTELIGENTE (AHORA EN SUPABASE) ---
-def busqueda_profunda_inteligente(pregunta: str, usuario_id: str = None):
-    """Búsqueda en memoria histórica usando Supabase"""
-    if not supabase: return "Sin conexión a memoria."
-
-    try:
-        if not usuario_id:
-            usuario_id = "00000000-0000-0000-0000-000000000000"
-        
-        # Búsqueda de los últimos 3 análisis relevantes (Por ahora cronológico)
-        # En el futuro activaremos pgvector para búsqueda semántica real.
-        resultado = supabase.table('conversaciones')\
-            .select('resumen, urgencia')\
-            .eq('usuario_id', usuario_id)\
-            .order('created_at', desc=True)\
-            .limit(3)\
-            .execute()
-        
-        if not resultado.data:
-            return "Sin memoria previa."
-        
-        relevantes = [f"{'🚨' if r['urgencia']=='ALTA' else '📄'} {r['resumen']}" 
-                      for r in resultado.data]
-        return "\n".join(relevantes)
-            
-    except Exception as e:
-        print(f"Error en búsqueda: {e}")
-        return "Error consultando memoria."
-
-# --- API ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("\n🔐 SERVIDOR V15 (SUPABASE) - LISTO")
-    yield
-
-app = FastAPI(title="WhatsApp IA Secure", lifespan=lifespan, docs_url=None, redoc_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
+# --- MODELOS DE DATOS ---
 class MensajeEntrada(BaseModel):
     mensaje: str
     modo_profundo: bool = False
 
-# 🔒 ENDPOINT 1: CHAT BLINDADO
-@app.post("/chat", dependencies=[Depends(verificar_llave)])
-async def chat_endpoint(entrada: MensajeEntrada):
-    urgencia = predecir_urgencia_ml(entrada.mensaje)
-    prefijo = "🚨 [URGENTE] " if urgencia == "ALTA" else ""
-    
-    contexto = ""
-    # Si activamos modo profundo o modo normal, siempre intentamos traer algo de memoria
+class ActualizarAlerta(BaseModel):
+    estado: str # 'pendiente', 'completada', 'descartada'
+
+# --- FUNCIONES DE SOPORTE ---
+async def verificar_llave(api_key: str = Depends(header_scheme)):
+    if APP_PASSWORD and api_key != APP_PASSWORD:
+        raise HTTPException(status_code=403, detail="Acceso Denegado")
+    return api_key
+
+def detectar_mime_real(nombre: str, mime: str) -> str:
+    if nombre.endswith('.opus'): return 'audio/ogg'
+    return mimetypes.guess_type(nombre)[0] or mime
+
+# --- LIFESPAN (INICIO) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global nlp
+    print("🚀 Iniciando Sistema v17 (Motor Inteligente)...")
     try:
-        # Traer contexto de Supabase (Últimos 2 eventos)
-        if supabase:
-            resultado = supabase.table('conversaciones')\
-                .select('resumen')\
-                .order('created_at', desc=True)\
-                .limit(2)\
-                .execute()
+        nlp = spacy.load("es_core_news_sm")
+    except:
+        import spacy.cli
+        spacy.cli.download("es_core_news_sm")
+        nlp = spacy.load("es_core_news_sm")
+    print("✅ NLP Listo")
+    yield
+    print("👋 Apagando sistema")
+
+app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ======================================================================
+# 🧠 LÓGICA DE IA (CLASIFICACIÓN Y ANÁLISIS)
+# ======================================================================
+
+async def clasificar_intencion(mensaje: str) -> Dict:
+    """Clasifica si el usuario quiere CONSULTAR, GUARDAR CONVERSACIÓN o CREAR TAREA."""
+    prompt = f"""
+    Analiza el mensaje y clasifica la intención en JSON exacto:
+    MENSAJE: "{mensaje}"
+
+    TIPOS:
+    - CONSULTA: Usuario pregunta sobre datos guardados ("¿qué pendientes tengo?", "¿qué pasó con el cliente X?").
+    - CONVERSACION: Usuario comparte un texto/chat para que lo analices y guardes ("Mira lo que me dijo Juan...", "Resumen de esto: ...").
+    - TAREA_MANUAL: Usuario ordena crear un recordatorio explícito ("Recuérdame llamar a Ana mañana").
+
+    JSON Schema:
+    {{
+        "tipo": "CONSULTA" | "CONVERSACION" | "TAREA_MANUAL",
+        "subtipo": "busqueda_tema | venta | tarea_academica | reclamo | recordatorio",
+        "urgencia": "ALTA" | "MEDIA" | "BAJA",
+        "entidades": {{ "persona": "nombre o null", "tema": "tema o null" }}
+    }}
+    """
+    try:
+        model = genai.GenerativeModel(MODELO_IA)
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text)
+    except:
+        # Fallback conservador: Asumir que es una conversación si es largo, consulta si es corto
+        return {"tipo": "CONVERSACION" if len(mensaje) > 50 else "CONSULTA", "urgencia": "BAJA", "entidades": {}}
+
+async def procesar_consulta(mensaje: str, modo_profundo: bool, clasificacion: Dict) -> Dict:
+    """Responde preguntas SIN guardar en la BD."""
+    contexto = ""
+    fuente = ""
+
+    if not supabase: return {"respuesta": "Error: Sin conexión a BD"}
+
+    try:
+        if modo_profundo:
+            # BÚSQUEDA PROFUNDA: Busca en historial de conversaciones
+            fuente = "Memoria Histórica (Conversaciones pasadas)"
+            query = supabase.table('conversaciones').select('resumen, tipo, created_at').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True).limit(15)
             
-            if resultado.data:
-                contexto = "\n".join([f"- {r['resumen']}" for r in resultado.data])
+            # Filtro básico por persona si existe (Implementación simple)
+            persona = clasificacion.get('entidades', {}).get('persona')
+            # Nota: Para filtro real por texto se requiere pgvector o filtro 'ilike'
+            
+            res = query.execute()
+            if res.data:
+                contexto = "HISTORIAL:\n" + "\n".join([f"- [{c['created_at'][:10]}] ({c['tipo']}) {c['resumen']}" for c in res.data])
+            else:
+                contexto = "No hay conversaciones guardadas."
+        
+        else:
+            # BÚSQUEDA RÁPIDA: Busca en ALERTAS pendientes
+            fuente = "Centro de Mando (Alertas Pendientes)"
+            res = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).eq('estado', 'pendiente').execute()
+            
+            if res.data:
+                contexto = "TAREAS PENDIENTES:\n" + "\n".join([f"- {a['titulo']} ({a['prioridad']}): {a['descripcion']}" for a in res.data])
+            else:
+                contexto = "No tienes tareas pendientes."
+
+        # Generar respuesta
+        prompt = f"""
+        Actúa como mi Asistente.
+        INTENCIÓN: Responder consulta del usuario.
+        FUENTE DE DATOS: {fuente}
+        
+        [DATOS]
+        {contexto}
+        
+        [PREGUNTA USUARIO]
+        {mensaje}
+        
+        Responde directo y útil. Si es lista, usa viñetas.
+        """
+        model = genai.GenerativeModel(MODELO_IA)
+        resp = model.generate_content(prompt)
+        
+        return {"respuesta": resp.text, "tipo": "consulta", "modo": "profundo" if modo_profundo else "rapido"}
+
     except Exception as e:
-        print(f"Error leyendo contexto: {e}")
+        return {"respuesta": f"Error al consultar: {str(e)}"}
+
+async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
+    """Analiza conversación, guarda en BD y genera alertas automáticas."""
+    if not supabase: return {"respuesta": "Error BD"}
 
     prompt = f"""
-    [SISTEMA] Urgencia detectada: {urgencia}
-    [MEMORIA RECIENTE] 
-    {contexto}
+    Analiza esta conversación/texto.
+    CONTEXTO: {clasificacion.get('subtipo', 'general')}
     
-    [USUARIO DICE] 
-    {entrada.mensaje}
+    Devuelve JSON con:
+    1. Resumen.
+    2. 'acciones_pendientes': Lista de tareas que se derivan de esto (si las hay).
     
-    Responde de forma útil, profesional y directa.
-    """
-    
-    try:
-        model = genai.GenerativeModel(MODELO_IA)
-        response = model.generate_content(prompt)
-        return {"respuesta": f"{prefijo}{response.text}", "modo": "Nube/Supabase"}
-    except Exception as e:
-        return {"respuesta": f"Error IA: {str(e)}"}
-
-# 🔒 ENDPOINT 2: ANÁLISIS DE ARCHIVOS BLINDADO
-@app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
-async def analizar_archivos_completo(files: List[UploadFile] = File(...), indexar_para_busqueda: bool = True):
-    texto_acumulado = ""
-    partes_para_gemini = []
-    
-    try:
-        # Lectura de archivos
-        for archivo in files:
-            contenido = await archivo.read()
-            mime = detectar_mime_real(archivo.filename, archivo.content_type)
-            
-            if "text" in mime or "json" in mime:
-                txt = contenido.decode('utf-8', errors='ignore')
-                texto_acumulado += txt + "\n"
-                partes_para_gemini.append(f"\n--- DOC ({archivo.filename}) ---\n{txt}\n")
-            else:
-                blob = {"mime_type": mime, "data": contenido}
-                partes_para_gemini.append(blob)
-
-        # Motores locales
-        datos_spacy = analizar_texto_con_spacy(texto_acumulado[:50000])
-        urgencia_global = predecir_urgencia_ml(texto_acumulado[:1000])
-
-        prompt_sistema = f"""
-        Actúa como Analista de Negocios y Asistente Personal.
-        Entidades detectadas: {', '.join(datos_spacy['personas'])}
-        Urgencia pre-calculada: {urgencia_global}
-        
-        Analiza el contenido y devuelve un JSON con esta estructura exacta:
-        {{
-            "ASISTENTE_ACTIVO": {{
-                "resumen_rapido": "Un resumen breve de lo que trata el archivo.",
-                "alertas_urgentes": ["Lista de cosas que requieren acción inmediata"],
-                "nivel_riesgo": "{urgencia_global}",
-                "tipo": "venta/reclamo/personal/otro"
+    JSON Schema:
+    {{
+        "resumen": "texto",
+        "tipo": "venta | reclamo | personal | trabajo",
+        "urgencia": "ALTA | MEDIA | BAJA",
+        "acciones_pendientes": [
+            {{
+                "titulo": "Llamar a X",
+                "descripcion": "Motivo...",
+                "prioridad": "ALTA | MEDIA | BAJA",
+                "tipo_alerta": "tarea | reunion | recordatorio"
             }}
-        }}
-        """
-        partes_para_gemini.insert(0, prompt_sistema)
-        
+        ]
+    }}
+    
+    TEXTO: "{mensaje}"
+    """
+    try:
         model = genai.GenerativeModel(MODELO_IA)
-        configuracion = genai.GenerationConfig(response_mime_type="application/json")
+        resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        analisis = json.loads(resp.text)
         
-        response = model.generate_content(
-            partes_para_gemini, 
-            generation_config=configuracion
-        )
+        # 1. Guardar Conversación
+        datos_conv = {
+            "usuario_id": USUARIO_ID_MVP,
+            "resumen": analisis['resumen'],
+            "tipo": analisis['tipo'],
+            "urgencia": analisis['urgencia'],
+            "metadata": analisis,
+            "plataforma": "chat_manual"
+        }
+        res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
+        conv_id = res_conv.data[0]['id']
         
-        texto_limpio = response.text.replace("```json", "").replace("```", "")
-        resultado = json.loads(texto_limpio)
-
-        # GUARDAR EN SUPABASE
-        guardar_en_db(
-            resultado['ASISTENTE_ACTIVO']['resumen_rapido'], 
-            datos_spacy['personas'], 
-            datos_spacy['lugares'], 
-            resultado, 
-            urgencia_global, 
-            indexar_para_busqueda
-        )
-        return {"status": "success", "data": resultado, "urgencia": urgencia_global}
+        # 2. Generar Alertas Automáticas
+        alertas_creadas = 0
+        if analisis.get('acciones_pendientes'):
+            alertas = []
+            for accion in analisis['acciones_pendientes']:
+                alertas.append({
+                    "usuario_id": USUARIO_ID_MVP,
+                    "conversacion_id": conv_id,
+                    "titulo": accion['titulo'],
+                    "descripcion": accion['descripcion'],
+                    "prioridad": accion['prioridad'],
+                    "tipo": accion.get('tipo_alerta', 'tarea'),
+                    "estado": "pendiente"
+                })
+            if alertas:
+                supabase.table('alertas').insert(alertas).execute()
+                alertas_creadas = len(alertas)
+        
+        msj_extra = f"\n🔔 {alertas_creadas} alertas creadas." if alertas_creadas > 0 else ""
+        return {
+            "respuesta": f"✅ Guardado. {analisis['resumen']}{msj_extra}",
+            "tipo": "analisis_conversacion",
+            "alertas_generadas": alertas_creadas
+        }
 
     except Exception as e:
-        print(f"❌ Error: {e}")
-        return {"status": "error", "data": {"error": str(e)}}
+        return {"respuesta": f"Error procesando conversación: {str(e)}"}
 
-# 🔒 ENDPOINT 3: WEBHOOK (PREPARADO PARA WHATSAPP AUTOMÁTICO)
+async def crear_tarea_manual(mensaje: str, clasificacion: Dict) -> Dict:
+    """Crea una alerta directa desde una orden del usuario."""
+    prompt = f"""
+    Extrae los datos de la tarea del mensaje: "{mensaje}"
+    JSON Schema:
+    {{
+        "titulo": "Corto y claro",
+        "descripcion": "Detalles",
+        "prioridad": "ALTA | MEDIA | BAJA"
+    }}
+    """
+    try:
+        model = genai.GenerativeModel(MODELO_IA)
+        resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        data = json.loads(resp.text)
+        
+        alerta = {
+            "usuario_id": USUARIO_ID_MVP,
+            "titulo": data['titulo'],
+            "descripcion": data['descripcion'],
+            "prioridad": data['prioridad'],
+            "tipo": "manual",
+            "estado": "pendiente"
+        }
+        supabase.table('alertas').insert(alerta).execute()
+        return {"respuesta": f"✅ Tarea agendada: {data['titulo']}", "tipo": "tarea_manual"}
+    except Exception as e:
+        return {"respuesta": f"Error creando tarea: {str(e)}"}
+
+# ======================================================================
+# 🚀 ENDPOINTS DE LA API
+# ======================================================================
+
+@app.post("/chat", dependencies=[Depends(verificar_llave)])
+async def chat_endpoint(entrada: MensajeEntrada):
+    """
+    Endpoint INTELIGENTE: Clasifica y distribuye la petición.
+    """
+    # 1. Clasificar Intención
+    clasificacion = await clasificar_intencion(entrada.mensaje)
+    tipo = clasificacion.get("tipo", "CONSULTA")
+    
+    print(f"🧠 Intención detectada: {tipo} | Profundo: {entrada.modo_profundo}")
+
+    # 2. Enrutar
+    if tipo == "CONSULTA":
+        return await procesar_consulta(entrada.mensaje, entrada.modo_profundo, clasificacion)
+    
+    elif tipo == "CONVERSACION":
+        # Si es conversación, se guarda y analiza
+        return await procesar_conversacion(entrada.mensaje, clasificacion)
+    
+    elif tipo == "TAREA_MANUAL":
+        return await crear_tarea_manual(entrada.mensaje, clasificacion)
+    
+    else:
+        return {"respuesta": "No entendí tu intención."}
+
+@app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
+async def analizar_archivos(files: List[UploadFile] = File(...)):
+    """Analiza archivos y genera alertas (Usa la lógica de procesar_conversacion)."""
+    texto_total = ""
+    for archivo in files:
+        content = await archivo.read()
+        try:
+            texto_total += f"\n--- {archivo.filename} ---\n{content.decode('utf-8')}\n"
+        except:
+            texto_total += f"\n[Binario {archivo.filename}]\n"
+    
+    # Reutilizamos la lógica de conversación para guardar y alertar
+    clasificacion = {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}
+    resultado = await procesar_conversacion(texto_total[:30000], clasificacion)
+    
+    return {"status": "success", "data": resultado}
+
+# --- NUEVOS ENDPOINTS PARA GESTIÓN DE ALERTAS (FRONTEND) ---
+
+@app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
+async def obtener_alertas(estado: str = "pendiente"):
+    """Devuelve las alertas para mostrar en la app."""
+    if not supabase: return {"alertas": []}
+    try:
+        query = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
+        if estado != "todas":
+            query = query.eq('estado', estado)
+        res = query.execute()
+        return {"alertas": res.data}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.patch("/api/alertas/{alerta_id}", dependencies=[Depends(verificar_llave)])
+async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
+    """Permite marcar alertas como completadas o descartadas."""
+    if not supabase: return {"status": "error"}
+    try:
+        res = supabase.table('alertas').update({'estado': body.estado}).eq('id', alerta_id).execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/webhook")
 async def webhook_whatsapp(payload: Dict):
-    """
-    Aquí recibiremos los mensajes de Evolution API en el futuro.
-    Por ahora solo confirma que recibió la señal.
-    """
-    print("📩 Webhook recibido:", payload)
+    print("📩 Webhook:", payload)
     return {"status": "recibido"}
 
 if __name__ == "__main__":
