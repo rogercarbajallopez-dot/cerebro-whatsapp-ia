@@ -1,9 +1,10 @@
 # ====================================================
-# WHATSAPP IA 17.0 - MOTOR DE INTELIGENCIA CENTRAL
-# Arquitectura: Clasificación de Intenciones + Gestión de Alertas
+# WHATSAPP IA 17.5 - CEREBRO INTELIGENTE + CONEXIÓN TWILIO
+# Arquitectura: Clasificación + Alertas + Webhook Compatible
 # ====================================================
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
+from fastapi.responses import Response
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
@@ -71,10 +72,11 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
-    print("🚀 Iniciando Sistema v17 (Motor Inteligente)...")
+    print("🚀 Iniciando Sistema v17.5 (Twilio Ready)...")
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
+        print("⚠️ Descargando modelo spaCy...")
         import spacy.cli
         spacy.cli.download("es_core_news_sm")
         nlp = spacy.load("es_core_news_sm")
@@ -113,61 +115,40 @@ async def clasificar_intencion(mensaje: str) -> Dict:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except:
-        # Fallback conservador: Asumir que es una conversación si es largo, consulta si es corto
         return {"tipo": "CONVERSACION" if len(mensaje) > 50 else "CONSULTA", "urgencia": "BAJA", "entidades": {}}
 
 async def procesar_consulta(mensaje: str, modo_profundo: bool, clasificacion: Dict) -> Dict:
     """Responde preguntas SIN guardar en la BD."""
     contexto = ""
     fuente = ""
-
     if not supabase: return {"respuesta": "Error: Sin conexión a BD"}
 
     try:
         if modo_profundo:
-            # BÚSQUEDA PROFUNDA: Busca en historial de conversaciones
-            fuente = "Memoria Histórica (Conversaciones pasadas)"
+            fuente = "Memoria Histórica"
             query = supabase.table('conversaciones').select('resumen, tipo, created_at').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True).limit(15)
-            
-            # Filtro básico por persona si existe (Implementación simple)
-            persona = clasificacion.get('entidades', {}).get('persona')
-            # Nota: Para filtro real por texto se requiere pgvector o filtro 'ilike'
-            
             res = query.execute()
             if res.data:
                 contexto = "HISTORIAL:\n" + "\n".join([f"- [{c['created_at'][:10]}] ({c['tipo']}) {c['resumen']}" for c in res.data])
             else:
                 contexto = "No hay conversaciones guardadas."
-        
         else:
-            # BÚSQUEDA RÁPIDA: Busca en ALERTAS pendientes
-            fuente = "Centro de Mando (Alertas Pendientes)"
+            fuente = "Alertas Pendientes"
             res = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).eq('estado', 'pendiente').execute()
-            
             if res.data:
                 contexto = "TAREAS PENDIENTES:\n" + "\n".join([f"- {a['titulo']} ({a['prioridad']}): {a['descripcion']}" for a in res.data])
             else:
                 contexto = "No tienes tareas pendientes."
 
-        # Generar respuesta
         prompt = f"""
-        Actúa como mi Asistente.
-        INTENCIÓN: Responder consulta del usuario.
-        FUENTE DE DATOS: {fuente}
-        
-        [DATOS]
-        {contexto}
-        
-        [PREGUNTA USUARIO]
-        {mensaje}
-        
-        Responde directo y útil. Si es lista, usa viñetas.
+        Actúa como mi Asistente. FUENTE: {fuente}
+        DATOS: {contexto}
+        PREGUNTA: {mensaje}
+        Responde directo y útil.
         """
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt)
-        
         return {"respuesta": resp.text, "tipo": "consulta", "modo": "profundo" if modo_profundo else "rapido"}
-
     except Exception as e:
         return {"respuesta": f"Error al consultar: {str(e)}"}
 
@@ -176,12 +157,8 @@ async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
     if not supabase: return {"respuesta": "Error BD"}
 
     prompt = f"""
-    Analiza esta conversación/texto.
-    CONTEXTO: {clasificacion.get('subtipo', 'general')}
-    
-    Devuelve JSON con:
-    1. Resumen.
-    2. 'acciones_pendientes': Lista de tareas que se derivan de esto (si las hay).
+    Analiza esta conversación. CONTEXTO: {clasificacion.get('subtipo', 'general')}
+    Devuelve JSON con: resumen, tipo, urgencia, acciones_pendientes (lista de tareas).
     
     JSON Schema:
     {{
@@ -193,11 +170,10 @@ async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
                 "titulo": "Llamar a X",
                 "descripcion": "Motivo...",
                 "prioridad": "ALTA | MEDIA | BAJA",
-                "tipo_alerta": "tarea | reunion | recordatorio"
+                "tipo_alerta": "tarea | reunion"
             }}
         ]
     }}
-    
     TEXTO: "{mensaje}"
     """
     try:
@@ -205,7 +181,6 @@ async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
-        # 1. Guardar Conversación
         datos_conv = {
             "usuario_id": USUARIO_ID_MVP,
             "resumen": analisis['resumen'],
@@ -217,7 +192,6 @@ async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
         conv_id = res_conv.data[0]['id']
         
-        # 2. Generar Alertas Automáticas
         alertas_creadas = 0
         if analisis.get('acciones_pendientes'):
             alertas = []
@@ -236,31 +210,19 @@ async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
                 alertas_creadas = len(alertas)
         
         msj_extra = f"\n🔔 {alertas_creadas} alertas creadas." if alertas_creadas > 0 else ""
-        return {
-            "respuesta": f"✅ Guardado. {analisis['resumen']}{msj_extra}",
-            "tipo": "analisis_conversacion",
-            "alertas_generadas": alertas_creadas
-        }
-
+        return {"respuesta": f"✅ Guardado. {analisis['resumen']}{msj_extra}", "tipo": "analisis_conversacion", "alertas_generadas": alertas_creadas}
     except Exception as e:
         return {"respuesta": f"Error procesando conversación: {str(e)}"}
 
 async def crear_tarea_manual(mensaje: str, clasificacion: Dict) -> Dict:
-    """Crea una alerta directa desde una orden del usuario."""
     prompt = f"""
-    Extrae los datos de la tarea del mensaje: "{mensaje}"
-    JSON Schema:
-    {{
-        "titulo": "Corto y claro",
-        "descripcion": "Detalles",
-        "prioridad": "ALTA | MEDIA | BAJA"
-    }}
+    Extrae datos de la tarea: "{mensaje}"
+    JSON: {{ "titulo": "...", "descripcion": "...", "prioridad": "ALTA/MEDIA/BAJA" }}
     """
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data = json.loads(resp.text)
-        
         alerta = {
             "usuario_id": USUARIO_ID_MVP,
             "titulo": data['titulo'],
@@ -280,32 +242,22 @@ async def crear_tarea_manual(mensaje: str, clasificacion: Dict) -> Dict:
 
 @app.post("/chat", dependencies=[Depends(verificar_llave)])
 async def chat_endpoint(entrada: MensajeEntrada):
-    """
-    Endpoint INTELIGENTE: Clasifica y distribuye la petición.
-    """
-    # 1. Clasificar Intención
+    """Chat inteligente para la App Flutter"""
     clasificacion = await clasificar_intencion(entrada.mensaje)
     tipo = clasificacion.get("tipo", "CONSULTA")
-    
-    print(f"🧠 Intención detectada: {tipo} | Profundo: {entrada.modo_profundo}")
+    print(f"🧠 Intención: {tipo}")
 
-    # 2. Enrutar
     if tipo == "CONSULTA":
         return await procesar_consulta(entrada.mensaje, entrada.modo_profundo, clasificacion)
-    
     elif tipo == "CONVERSACION":
-        # Si es conversación, se guarda y analiza
         return await procesar_conversacion(entrada.mensaje, clasificacion)
-    
     elif tipo == "TAREA_MANUAL":
         return await crear_tarea_manual(entrada.mensaje, clasificacion)
-    
     else:
         return {"respuesta": "No entendí tu intención."}
 
 @app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
 async def analizar_archivos(files: List[UploadFile] = File(...)):
-    """Analiza archivos y genera alertas (Usa la lógica de procesar_conversacion)."""
     texto_total = ""
     for archivo in files:
         content = await archivo.read()
@@ -313,42 +265,60 @@ async def analizar_archivos(files: List[UploadFile] = File(...)):
             texto_total += f"\n--- {archivo.filename} ---\n{content.decode('utf-8')}\n"
         except:
             texto_total += f"\n[Binario {archivo.filename}]\n"
-    
-    # Reutilizamos la lógica de conversación para guardar y alertar
     clasificacion = {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}
     resultado = await procesar_conversacion(texto_total[:30000], clasificacion)
-    
     return {"status": "success", "data": resultado}
-
-# --- NUEVOS ENDPOINTS PARA GESTIÓN DE ALERTAS (FRONTEND) ---
 
 @app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
 async def obtener_alertas(estado: str = "pendiente"):
-    """Devuelve las alertas para mostrar en la app."""
     if not supabase: return {"alertas": []}
     try:
         query = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
-        if estado != "todas":
-            query = query.eq('estado', estado)
+        if estado != "todas": query = query.eq('estado', estado)
         res = query.execute()
         return {"alertas": res.data}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as e: return {"error": str(e)}
 
 @app.patch("/api/alertas/{alerta_id}", dependencies=[Depends(verificar_llave)])
 async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
-    """Permite marcar alertas como completadas o descartadas."""
     if not supabase: return {"status": "error"}
     try:
         res = supabase.table('alertas').update({'estado': body.estado}).eq('id', alerta_id).execute()
         return {"status": "success", "data": res.data}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as e: return {"error": str(e)}
 
+# 🔥 WEBHOOK CORREGIDO PARA TWILIO (FORM DATA) 🔥
 @app.post("/webhook")
-async def webhook_whatsapp(payload: Dict):
-    print("📩 Webhook:", payload)
-    return {"status": "recibido"}
+async def webhook_whatsapp(request: Request):
+    """Recibe mensajes de Twilio correctamente."""
+    # 1. Leer datos de formulario (Twilio no manda JSON)
+    form_data = await request.form()
+    data = dict(form_data)
+    
+    # 2. Extraer datos
+    mensaje = data.get('Body', '').strip()
+    remitente = data.get('From', '')
+    
+    print(f"📩 Webhook Twilio: {mensaje} de {remitente}")
+    
+    # 3. Guardar en Supabase (Historial crudo)
+    # Por ahora solo guardamos para verificar conexión y no perder datos.
+    # En el futuro aquí conectaremos 'clasificar_intencion'
+    if supabase and mensaje:
+        try:
+            supabase.table('conversaciones').insert({
+                'usuario_id': USUARIO_ID_MVP,
+                'resumen': f"[WhatsApp] {mensaje}",
+                'tipo': 'whatsapp_inbox',
+                'urgencia': 'BAJA',
+                'plataforma': 'twilio',
+                'metadata': {'raw': str(data)}
+            }).execute()
+        except Exception as e:
+            print(f"Error guardando webhook: {e}")
+
+    # 4. Responder XML a Twilio (OBLIGATORIO)
+    return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
 
 if __name__ == "__main__":
     import uvicorn
