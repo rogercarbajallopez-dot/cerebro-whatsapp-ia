@@ -1,6 +1,6 @@
 # ====================================================
-# WHATSAPP IA 17.5 - CEREBRO INTELIGENTE + CONEXIÓN TWILIO
-# Arquitectura: Clasificación + Alertas + Webhook Compatible
+# WHATSAPP IA 18.0 - EL PORTERO INTELIGENTE
+# Arquitectura: Filtro de Valor + Twilio + Alertas
 # ====================================================
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
@@ -72,7 +72,7 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
-    print("🚀 Iniciando Sistema v17.5 (Twilio Ready)...")
+    print("🚀 Iniciando Sistema v18 (Portero Inteligente)...")
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
@@ -88,26 +88,27 @@ app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ======================================================================
-# 🧠 LÓGICA DE IA (CLASIFICACIÓN Y ANÁLISIS)
+# 🧠 LÓGICA DE IA (EL PORTERO Y EL ANALISTA)
 # ======================================================================
 
-async def clasificar_intencion(mensaje: str) -> Dict:
-    """Clasifica si el usuario quiere CONSULTAR, GUARDAR CONVERSACIÓN o CREAR TAREA."""
+async def clasificar_intencion_portero(mensaje: str) -> Dict:
+    """
+    EL PORTERO: Decide si el mensaje vale la pena o es basura.
+    """
     prompt = f"""
-    Analiza el mensaje y clasifica la intención en JSON exacto:
+    Analiza el mensaje de WhatsApp y clasifica su VALOR PARA GUARDAR.
     MENSAJE: "{mensaje}"
 
     TIPOS:
-    - CONSULTA: Usuario pregunta sobre datos guardados ("¿qué pendientes tengo?", "¿qué pasó con el cliente X?").
-    - CONVERSACION: Usuario comparte un texto/chat para que lo analices y guardes ("Mira lo que me dijo Juan...", "Resumen de esto: ...").
-    - TAREA_MANUAL: Usuario ordena crear un recordatorio explícito ("Recuérdame llamar a Ana mañana").
+    - BASURA: Saludos ("Hola", "Buenos días"), agradecimientos ("Gracias", "Ok"), confirmaciones simples o preguntas de gestión ("¿Qué tengo pendiente?"). -> NO GUARDAR EN BD.
+    - VALOR: Información sobre clientes, proyectos, acuerdos, reclamos, datos nuevos, cotizaciones. -> GUARDAR Y ANALIZAR.
+    - TAREA: Orden directa de crear recordatorio o tarea ("Recuérdame llamar a Ana", "Agendar reunión"). -> CREAR ALERTA (NO GUARDAR CHARLA).
 
     JSON Schema:
     {{
-        "tipo": "CONSULTA" | "CONVERSACION" | "TAREA_MANUAL",
-        "subtipo": "busqueda_tema | venta | tarea_academica | reclamo | recordatorio",
-        "urgencia": "ALTA" | "MEDIA" | "BAJA",
-        "entidades": {{ "persona": "nombre o null", "tema": "tema o null" }}
+        "tipo": "BASURA" | "VALOR" | "TAREA",
+        "subtipo": "saludo | consulta | venta | reclamo | recordatorio",
+        "urgencia": "ALTA | MEDIA | BAJA"
     }}
     """
     try:
@@ -115,209 +116,198 @@ async def clasificar_intencion(mensaje: str) -> Dict:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except:
-        return {"tipo": "CONVERSACION" if len(mensaje) > 50 else "CONSULTA", "urgencia": "BAJA", "entidades": {}}
+        # Fallback: Si es muy corto (<15 chars) es basura, si no asumimos valor por seguridad
+        return {"tipo": "VALOR" if len(mensaje) > 15 else "BASURA"}
 
-async def procesar_consulta(mensaje: str, modo_profundo: bool, clasificacion: Dict) -> Dict:
-    """Responde preguntas SIN guardar en la BD."""
-    contexto = ""
-    fuente = ""
-    if not supabase: return {"respuesta": "Error: Sin conexión a BD"}
-
-    try:
-        if modo_profundo:
-            fuente = "Memoria Histórica"
-            query = supabase.table('conversaciones').select('resumen, tipo, created_at').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True).limit(15)
-            res = query.execute()
-            if res.data:
-                contexto = "HISTORIAL:\n" + "\n".join([f"- [{c['created_at'][:10]}] ({c['tipo']}) {c['resumen']}" for c in res.data])
-            else:
-                contexto = "No hay conversaciones guardadas."
-        else:
-            fuente = "Alertas Pendientes"
-            res = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).eq('estado', 'pendiente').execute()
-            if res.data:
-                contexto = "TAREAS PENDIENTES:\n" + "\n".join([f"- {a['titulo']} ({a['prioridad']}): {a['descripcion']}" for a in res.data])
-            else:
-                contexto = "No tienes tareas pendientes."
-
-        prompt = f"""
-        Actúa como mi Asistente. FUENTE: {fuente}
-        DATOS: {contexto}
-        PREGUNTA: {mensaje}
-        Responde directo y útil.
-        """
-        model = genai.GenerativeModel(MODELO_IA)
-        resp = model.generate_content(prompt)
-        return {"respuesta": resp.text, "tipo": "consulta", "modo": "profundo" if modo_profundo else "rapido"}
-    except Exception as e:
-        return {"respuesta": f"Error al consultar: {str(e)}"}
-
-async def procesar_conversacion(mensaje: str, clasificacion: Dict) -> Dict:
-    """Analiza conversación, guarda en BD y genera alertas automáticas."""
-    if not supabase: return {"respuesta": "Error BD"}
+async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: str = "webhook") -> Dict:
+    """
+    Esto SOLO se ejecuta si el mensaje es IMPORTANTE (VALOR).
+    Guarda el análisis profesional y crea alertas si aplica.
+    """
+    if not supabase: return {"status": "error"}
 
     prompt = f"""
-    Analiza esta conversación. CONTEXTO: {clasificacion.get('subtipo', 'general')}
-    Devuelve JSON con: resumen, tipo, urgencia, acciones_pendientes (lista de tareas).
+    Analiza esta información valiosa recibida por WhatsApp.
+    MENSAJE ORIGINAL: "{mensaje}"
+    CONTEXTO DETECTADO: {clasificacion.get('subtipo')}
+    
+    INSTRUCCIONES:
+    1. Genera un RESUMEN PROFESIONAL de lo que pasó (para guardar en historial).
+    2. Detecta si hay TAREAS derivadas.
     
     JSON Schema:
     {{
-        "resumen": "texto",
-        "tipo": "venta | reclamo | personal | trabajo",
-        "urgencia": "ALTA | MEDIA | BAJA",
-        "acciones_pendientes": [
-            {{
-                "titulo": "Llamar a X",
-                "descripcion": "Motivo...",
-                "prioridad": "ALTA | MEDIA | BAJA",
-                "tipo_alerta": "tarea | reunion"
-            }}
+        "resumen_guardar": "Texto profesional resumido del evento (Ej: Cliente Juan aceptó cotización X)",
+        "tipo_evento": "reunion | acuerdo | dato_cliente | reclamo | venta",
+        "tareas": [
+            {{ "titulo": "...", "prioridad": "ALTA/MEDIA", "descripcion": "..." }}
         ]
     }}
-    TEXTO: "{mensaje}"
     """
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
+        # 1. GUARDAR SOLO EL ANÁLISIS (Limpieza de datos)
         datos_conv = {
             "usuario_id": USUARIO_ID_MVP,
-            "resumen": analisis['resumen'],
-            "tipo": analisis['tipo'],
-            "urgencia": analisis['urgencia'],
-            "metadata": analisis,
-            "plataforma": "chat_manual"
+            "resumen": analisis['resumen_guardar'], # <--- GUARDAMOS EL RESUMEN, NO EL MENSAJE CRUDO
+            "tipo": analisis['tipo_evento'],
+            "urgencia": clasificacion.get('urgencia', 'BAJA'),
+            "metadata": {"raw_msg": mensaje if len(mensaje) < 200 else mensaje[:200] + "..."}, # Guardamos raw solo si es corto o referencia
+            "plataforma": origen
         }
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
         conv_id = res_conv.data[0]['id']
         
+        # 2. CREAR ALERTAS SI HAY
         alertas_creadas = 0
-        if analisis.get('acciones_pendientes'):
+        if analisis.get('tareas'):
             alertas = []
-            for accion in analisis['acciones_pendientes']:
+            for t in analisis['tareas']:
                 alertas.append({
                     "usuario_id": USUARIO_ID_MVP,
                     "conversacion_id": conv_id,
-                    "titulo": accion['titulo'],
-                    "descripcion": accion['descripcion'],
-                    "prioridad": accion['prioridad'],
-                    "tipo": accion.get('tipo_alerta', 'tarea'),
+                    "titulo": t['titulo'],
+                    "descripcion": t.get('descripcion', f"Derivado de: {analisis['resumen_guardar']}"),
+                    "prioridad": t['prioridad'],
+                    "tipo": "auto_detectada",
                     "estado": "pendiente"
                 })
-            if alertas:
-                supabase.table('alertas').insert(alertas).execute()
-                alertas_creadas = len(alertas)
-        
-        msj_extra = f"\n🔔 {alertas_creadas} alertas creadas." if alertas_creadas > 0 else ""
-        return {"respuesta": f"✅ Guardado. {analisis['resumen']}{msj_extra}", "tipo": "analisis_conversacion", "alertas_generadas": alertas_creadas}
-    except Exception as e:
-        return {"respuesta": f"Error procesando conversación: {str(e)}"}
+            supabase.table('alertas').insert(alertas).execute()
+            alertas_creadas = len(alertas)
 
-async def crear_tarea_manual(mensaje: str, clasificacion: Dict) -> Dict:
-    prompt = f"""
-    Extrae datos de la tarea: "{mensaje}"
-    JSON: {{ "titulo": "...", "descripcion": "...", "prioridad": "ALTA/MEDIA/BAJA" }}
-    """
+        return {
+            "status": "guardado", 
+            "resumen": analisis['resumen_guardar'], 
+            "alertas_generadas": alertas_creadas,
+            "respuesta": f"✅ Info guardada: {analisis['resumen_guardar']}"
+        }
+        
+    except Exception as e:
+        print(f"Error procesando valor: {e}")
+        return {"status": "error", "respuesta": f"Error: {str(e)}"}
+
+async def crear_tarea_directa(mensaje: str) -> Dict:
+    """Crea una alerta directa sin guardar conversación (Intención TAREA)."""
+    prompt = f"Extrae tarea de: '{mensaje}'. JSON: {{'titulo': '...', 'prioridad': '...'}}"
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data = json.loads(resp.text)
-        alerta = {
+        
+        supabase.table('alertas').insert({
             "usuario_id": USUARIO_ID_MVP,
             "titulo": data['titulo'],
-            "descripcion": data['descripcion'],
+            "descripcion": "Creada vía WhatsApp",
             "prioridad": data['prioridad'],
             "tipo": "manual",
             "estado": "pendiente"
-        }
-        supabase.table('alertas').insert(alerta).execute()
-        return {"respuesta": f"✅ Tarea agendada: {data['titulo']}", "tipo": "tarea_manual"}
-    except Exception as e:
-        return {"respuesta": f"Error creando tarea: {str(e)}"}
+        }).execute()
+        return {"status": "tarea_creada", "respuesta": f"✅ Tarea creada: {data['titulo']}"}
+    except:
+        return {"status": "error"}
+
+async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
+    """Responde consultas sin guardar nada en BD."""
+    if not supabase: return "Error BD"
+    
+    contexto = ""
+    if modo_profundo:
+        res = supabase.table('conversaciones').select('resumen').order('created_at', desc=True).limit(5).execute()
+        if res.data:
+            contexto = "HISTORIAL RELEVANTE:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
+    else:
+        res = supabase.table('alertas').select('*').eq('estado', 'pendiente').execute()
+        if res.data:
+            contexto = "TUS PENDIENTES:\n" + "\n".join([f"- {a['titulo']}" for a in res.data])
+    
+    prompt = f"Actúa como asistente. DATOS: {contexto}. PREGUNTA: {mensaje}. Responde breve."
+    model = genai.GenerativeModel(MODELO_IA)
+    return model.generate_content(prompt).text
 
 # ======================================================================
-# 🚀 ENDPOINTS DE LA API
+# 🚀 ENDPOINTS API
 # ======================================================================
 
 @app.post("/chat", dependencies=[Depends(verificar_llave)])
 async def chat_endpoint(entrada: MensajeEntrada):
-    """Chat inteligente para la App Flutter"""
-    clasificacion = await clasificar_intencion(entrada.mensaje)
-    tipo = clasificacion.get("tipo", "CONSULTA")
-    print(f"🧠 Intención: {tipo}")
-
-    if tipo == "CONSULTA":
-        return await procesar_consulta(entrada.mensaje, entrada.modo_profundo, clasificacion)
-    elif tipo == "CONVERSACION":
-        return await procesar_conversacion(entrada.mensaje, clasificacion)
-    elif tipo == "TAREA_MANUAL":
-        return await crear_tarea_manual(entrada.mensaje, clasificacion)
+    """Endpoint para la App Flutter (Consulta directa)."""
+    # Si viene de la App, asumimos que es una CONSULTA o una orden directa.
+    # Usamos el mismo portero para ver si es tarea manual o consulta
+    decision = await clasificar_intencion_portero(entrada.mensaje)
+    
+    if decision['tipo'] == 'TAREA':
+        res = await crear_tarea_directa(entrada.mensaje)
+        return {"respuesta": res['respuesta']}
+    elif decision['tipo'] == 'VALOR': # Si el usuario pega un texto largo en el chat
+         res = await procesar_informacion_valor(entrada.mensaje, decision, "app_manual")
+         return {"respuesta": res['respuesta'], "alertas_generadas": res.get('alertas_generadas', 0)}
     else:
-        return {"respuesta": "No entendí tu intención."}
+        # Es consulta o basura (saludo), respondemos sin guardar
+        respuesta = await procesar_consulta_rapida(entrada.mensaje, entrada.modo_profundo)
+        return {"respuesta": respuesta}
 
 @app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
 async def analizar_archivos(files: List[UploadFile] = File(...)):
-    texto_total = ""
-    for archivo in files:
-        content = await archivo.read()
-        try:
-            texto_total += f"\n--- {archivo.filename} ---\n{content.decode('utf-8')}\n"
-        except:
-            texto_total += f"\n[Binario {archivo.filename}]\n"
-    clasificacion = {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}
-    resultado = await procesar_conversacion(texto_total[:30000], clasificacion)
-    return {"status": "success", "data": resultado}
+    """Si subes archivo manual, asumimos que ES DE VALOR."""
+    texto = ""
+    for f in files:
+        c = await f.read()
+        texto += f"\n{c.decode('utf-8', errors='ignore')}"
+    
+    # Forzamos procesamiento como valor
+    res = await procesar_informacion_valor(texto[:30000], {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}, "app_archivo")
+    return {"status": "success", "data": res}
 
 @app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
 async def obtener_alertas(estado: str = "pendiente"):
     if not supabase: return {"alertas": []}
-    try:
-        query = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
-        if estado != "todas": query = query.eq('estado', estado)
-        res = query.execute()
-        return {"alertas": res.data}
-    except Exception as e: return {"error": str(e)}
+    q = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
+    if estado != "todas": q = q.eq('estado', estado)
+    return {"alertas": q.execute().data}
 
 @app.patch("/api/alertas/{alerta_id}", dependencies=[Depends(verificar_llave)])
 async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
     if not supabase: return {"status": "error"}
-    try:
-        res = supabase.table('alertas').update({'estado': body.estado}).eq('id', alerta_id).execute()
-        return {"status": "success", "data": res.data}
-    except Exception as e: return {"error": str(e)}
+    res = supabase.table('alertas').update({'estado': body.estado}).eq('id', alerta_id).execute()
+    return {"status": "success", "data": res.data}
 
-# 🔥 WEBHOOK CORREGIDO PARA TWILIO (FORM DATA) 🔥
+# 🔥 WEBHOOK INTELIGENTE (EL PORTERO V18) 🔥
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request):
-    """Recibe mensajes de Twilio correctamente."""
-    # 1. Leer datos de formulario (Twilio no manda JSON)
+    """
+    Recibe WhatsApp -> Clasifica -> Decide si guardar o no.
+    """
     form_data = await request.form()
     data = dict(form_data)
-    
-    # 2. Extraer datos
     mensaje = data.get('Body', '').strip()
-    remitente = data.get('From', '')
     
-    print(f"📩 Webhook Twilio: {mensaje} de {remitente}")
-    
-    # 3. Guardar en Supabase (Historial crudo)
-    # Por ahora solo guardamos para verificar conexión y no perder datos.
-    # En el futuro aquí conectaremos 'clasificar_intencion'
-    if supabase and mensaje:
-        try:
-            supabase.table('conversaciones').insert({
-                'usuario_id': USUARIO_ID_MVP,
-                'resumen': f"[WhatsApp] {mensaje}",
-                'tipo': 'whatsapp_inbox',
-                'urgencia': 'BAJA',
-                'plataforma': 'twilio',
-                'metadata': {'raw': str(data)}
-            }).execute()
-        except Exception as e:
-            print(f"Error guardando webhook: {e}")
+    if not mensaje: 
+        return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
-    # 4. Responder XML a Twilio (OBLIGATORIO)
+    print(f"📩 WhatsApp recibido: {mensaje}")
+    
+    # 1. EL PORTERO DECIDE
+    decision = await clasificar_intencion_portero(mensaje)
+    tipo = decision.get('tipo', 'BASURA')
+    
+    print(f"🧠 Decisión del Portero: {tipo}")
+    
+    if tipo == "BASURA":
+        print("🗑️ Mensaje descartado (No se guarda en BD).")
+        # No guardamos nada. Silencio absoluto en la DB.
+        
+    elif tipo == "VALOR":
+        print("💎 Información valiosa detectada. Procesando...")
+        await procesar_informacion_valor(mensaje, decision, "whatsapp_webhook")
+        
+    elif tipo == "TAREA":
+        print("📌 Solicitud de tarea detectada. Creando alerta...")
+        await crear_tarea_directa(mensaje)
+
+    # Respuesta vacía a Twilio para confirmar recepción
     return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
 
 if __name__ == "__main__":
