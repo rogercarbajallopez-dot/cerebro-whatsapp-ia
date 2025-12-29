@@ -1,6 +1,6 @@
 # ====================================================
-# WHATSAPP IA 18.0 - EL PORTERO INTELIGENTE
-# Arquitectura: Filtro de Valor + Twilio + Alertas
+# WHATSAPP IA 18.5 - EL PORTERO INTELIGENTE + AUTO-ETIQUETADO
+# Arquitectura: Filtro de Valor + Twilio + Alertas + Categorización
 # ====================================================
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
@@ -72,7 +72,7 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
-    print("🚀 Iniciando Sistema v18 (Portero Inteligente)...")
+    print("🚀 Iniciando Sistema v18.5 (Portero con Etiquetas)...")
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
@@ -94,6 +94,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def clasificar_intencion_portero(mensaje: str) -> Dict:
     """
     EL PORTERO: Decide si el mensaje vale la pena o es basura.
+    (Mantenemos lógica original para no romper el flujo de entrada)
     """
     prompt = f"""
     Analiza el mensaje de WhatsApp y clasifica su VALOR PARA GUARDAR.
@@ -122,10 +123,11 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
 async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: str = "webhook") -> Dict:
     """
     Esto SOLO se ejecuta si el mensaje es IMPORTANTE (VALOR).
-    Guarda el análisis profesional y crea alertas si aplica.
+    Guarda el análisis profesional y crea alertas con ETIQUETAS AUTOMÁTICAS.
     """
     if not supabase: return {"status": "error"}
 
+    # --- CAMBIO: Prompt actualizado para incluir 'etiqueta' en las tareas ---
     prompt = f"""
     Analiza esta información valiosa recibida por WhatsApp.
     MENSAJE ORIGINAL: "{mensaje}"
@@ -134,13 +136,23 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
     INSTRUCCIONES:
     1. Genera un RESUMEN PROFESIONAL de lo que pasó (para guardar en historial).
     2. Detecta si hay TAREAS derivadas.
+    3. Para cada tarea, asigna una ETIQUETA obligatoria entre: [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, HOGAR].
+       - "PAREJA": Todo lo romántico, citas, aniversarios.
+       - "NEGOCIO": Clientes, pagos, proyectos.
+       - "SALUD": Médicos, medicinas, deporte.
+       - "PERSONAL": Trámites propios, ocio individual.
     
     JSON Schema:
     {{
-        "resumen_guardar": "Texto profesional resumido del evento (Ej: Cliente Juan aceptó cotización X)",
+        "resumen_guardar": "Texto profesional resumido del evento",
         "tipo_evento": "reunion | acuerdo | dato_cliente | reclamo | venta",
         "tareas": [
-            {{ "titulo": "...", "prioridad": "ALTA/MEDIA", "descripcion": "..." }}
+            {{ 
+                "titulo": "...", 
+                "prioridad": "ALTA/MEDIA", 
+                "descripcion": "...", 
+                "etiqueta": "NEGOCIO" | "ESTUDIO" | "PAREJA" | "SALUD" | "PERSONAL" | "HOGAR" 
+            }}
         ]
     }}
     """
@@ -149,19 +161,19 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
-        # 1. GUARDAR SOLO EL ANÁLISIS (Limpieza de datos)
+        # 1. GUARDAR SOLO EL ANÁLISIS (Limpieza de datos - Código Original mantenido)
         datos_conv = {
             "usuario_id": USUARIO_ID_MVP,
-            "resumen": analisis['resumen_guardar'], # <--- GUARDAMOS EL RESUMEN, NO EL MENSAJE CRUDO
+            "resumen": analisis['resumen_guardar'], 
             "tipo": analisis['tipo_evento'],
             "urgencia": clasificacion.get('urgencia', 'BAJA'),
-            "metadata": {"raw_msg": mensaje if len(mensaje) < 200 else mensaje[:200] + "..."}, # Guardamos raw solo si es corto o referencia
+            "metadata": {"raw_msg": mensaje if len(mensaje) < 200 else mensaje[:200] + "..."}, 
             "plataforma": origen
         }
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
         conv_id = res_conv.data[0]['id']
         
-        # 2. CREAR ALERTAS SI HAY
+        # 2. CREAR ALERTAS SI HAY (Con Etiqueta)
         alertas_creadas = 0
         if analisis.get('tareas'):
             alertas = []
@@ -173,7 +185,8 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
                     "descripcion": t.get('descripcion', f"Derivado de: {analisis['resumen_guardar']}"),
                     "prioridad": t['prioridad'],
                     "tipo": "auto_detectada",
-                    "estado": "pendiente"
+                    "estado": "pendiente",
+                    "etiqueta": t.get('etiqueta', 'PERSONAL') # --- CAMBIO: Campo nuevo
                 })
             supabase.table('alertas').insert(alertas).execute()
             alertas_creadas = len(alertas)
@@ -191,7 +204,15 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
 
 async def crear_tarea_directa(mensaje: str) -> Dict:
     """Crea una alerta directa sin guardar conversación (Intención TAREA)."""
-    prompt = f"Extrae tarea de: '{mensaje}'. JSON: {{'titulo': '...', 'prioridad': '...'}}"
+    # --- CAMBIO: Prompt actualizado para inferir etiqueta en tarea directa ---
+    prompt = f"""
+    Extrae tarea de: '{mensaje}'. 
+    JSON Schema: {{
+        'titulo': '...', 
+        'prioridad': 'ALTA/MEDIA/BAJA',
+        'etiqueta': 'NEGOCIO' | 'ESTUDIO' | 'PAREJA' | 'SALUD' | 'PERSONAL' | 'HOGAR'
+    }}
+    """
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
@@ -203,9 +224,10 @@ async def crear_tarea_directa(mensaje: str) -> Dict:
             "descripcion": "Creada vía WhatsApp",
             "prioridad": data['prioridad'],
             "tipo": "manual",
-            "estado": "pendiente"
+            "estado": "pendiente",
+            "etiqueta": data.get('etiqueta', 'PERSONAL') # --- CAMBIO: Campo nuevo
         }).execute()
-        return {"status": "tarea_creada", "respuesta": f"✅ Tarea creada: {data['titulo']}"}
+        return {"status": "tarea_creada", "respuesta": f"✅ Tarea creada: {data['titulo']} ({data.get('etiqueta', 'PERSONAL')})"}
     except:
         return {"status": "error"}
 
@@ -219,9 +241,10 @@ async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
         if res.data:
             contexto = "HISTORIAL RELEVANTE:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
     else:
-        res = supabase.table('alertas').select('*').eq('estado', 'pendiente').execute()
+        # --- CAMBIO: Traemos también la etiqueta para dar contexto en las respuestas ---
+        res = supabase.table('alertas').select('titulo, etiqueta').eq('estado', 'pendiente').execute()
         if res.data:
-            contexto = "TUS PENDIENTES:\n" + "\n".join([f"- {a['titulo']}" for a in res.data])
+            contexto = "TUS PENDIENTES:\n" + "\n".join([f"- [{a.get('etiqueta','GEN')}] {a['titulo']}" for a in res.data])
     
     prompt = f"Actúa como asistente. DATOS: {contexto}. PREGUNTA: {mensaje}. Responde breve."
     model = genai.GenerativeModel(MODELO_IA)
@@ -235,17 +258,15 @@ async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
 async def chat_endpoint(entrada: MensajeEntrada):
     """Endpoint para la App Flutter (Consulta directa)."""
     # Si viene de la App, asumimos que es una CONSULTA o una orden directa.
-    # Usamos el mismo portero para ver si es tarea manual o consulta
     decision = await clasificar_intencion_portero(entrada.mensaje)
     
     if decision['tipo'] == 'TAREA':
         res = await crear_tarea_directa(entrada.mensaje)
         return {"respuesta": res['respuesta']}
-    elif decision['tipo'] == 'VALOR': # Si el usuario pega un texto largo en el chat
+    elif decision['tipo'] == 'VALOR': 
          res = await procesar_informacion_valor(entrada.mensaje, decision, "app_manual")
          return {"respuesta": res['respuesta'], "alertas_generadas": res.get('alertas_generadas', 0)}
     else:
-        # Es consulta o basura (saludo), respondemos sin guardar
         respuesta = await procesar_consulta_rapida(entrada.mensaje, entrada.modo_profundo)
         return {"respuesta": respuesta}
 
@@ -264,6 +285,7 @@ async def analizar_archivos(files: List[UploadFile] = File(...)):
 @app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
 async def obtener_alertas(estado: str = "pendiente"):
     if not supabase: return {"alertas": []}
+    # --- CAMBIO: Aseguramos traer la columna etiqueta si existe ---
     q = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
     if estado != "todas": q = q.eq('estado', estado)
     return {"alertas": q.execute().data}
@@ -313,4 +335,3 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
-
