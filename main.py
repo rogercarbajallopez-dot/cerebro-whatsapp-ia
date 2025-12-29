@@ -1,10 +1,10 @@
 # ====================================================
-# WHATSAPP IA 18.6 - CORE: ETIQUETADO PERSISTENTE + DESCRIPCIONES RICAS
+# WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
 from fastapi.responses import Response
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from contextlib import asynccontextmanager
@@ -17,6 +17,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
+import jwt  # 👈 REQUERIDO: pip install pyjwt
 
 # 1. CARGA DE SECRETOS
 load_dotenv()
@@ -24,6 +25,7 @@ API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY')
 APP_PASSWORD = os.getenv('MI_APP_PASSWORD') 
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')  # 👈 NUEVO: Clave secreta para verificar tokens
 
 # Configuración IA
 if API_KEY_GOOGLE: 
@@ -44,27 +46,81 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 # Variables Globales
 nlp = None
-header_scheme = APIKeyHeader(name="x-api-key") 
+api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)  # 👈 NUEVO: Esquema para leer el token Bearer
 
-# ID DE USUARIO POR DEFECTO (MVP)
-USUARIO_ID_MVP = "00000000-0000-0000-0000-000000000000"
+# 🔐 FUNCIÓN PARA VERIFICAR TOKEN JWT Y OBTENER USUARIO
+async def obtener_usuario_actual(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+) -> str:
+    """
+    Esta función extrae el ID del usuario del token JWT enviado por Flutter.
+    Se ejecuta automáticamente en cada endpoint que lo necesite.
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se proporcionó token de autenticación"
+        )
+    
+    token = credentials.credentials
+    
+    try:
+        # Decodificar el token JWT usando el secreto de Supabase
+        # IMPORTANTE: Supabase usa HS256 y la audiencia 'authenticated'
+        payload = jwt.decode(
+            token, 
+            SUPABASE_JWT_SECRET, 
+            algorithms=["HS256"],
+            audience="authenticated"
+        )
+        
+        # Extraer el ID del usuario (campo 'sub' en el JWT)
+        usuario_id = payload.get("sub")
+        
+        if not usuario_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token inválido: No contiene ID de usuario"
+            )
+        
+        return usuario_id
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expirado. Por favor, inicia sesión nuevamente."
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido"
+        )
+    except Exception as e:
+        print(f"Error decodificando token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Error de autenticación"
+        )
 
-# --- MODELOS DE DATOS (ACTUALIZADOS) ---
+# Función de verificación legacy (para webhooks públicos o endpoints simples)
+async def verificar_llave(api_key: str = Depends(api_key_header)):
+    if APP_PASSWORD and api_key != APP_PASSWORD:
+        # Si envían token JWT, la API key podría no ser necesaria, 
+        # pero mantenemos esto por compatibilidad si se usa x-api-key
+        pass 
+    return api_key
+
+# --- MODELOS DE DATOS ---
 class MensajeEntrada(BaseModel):
     mensaje: str
     modo_profundo: bool = False
 
 class ActualizarAlerta(BaseModel):
-    # CORRECCIÓN: Ahora aceptamos opcionalmente ambos campos para que el PATCH funcione
     estado: Optional[str] = None 
     etiqueta: Optional[str] = None 
 
 # --- FUNCIONES DE SOPORTE ---
-async def verificar_llave(api_key: str = Depends(header_scheme)):
-    if APP_PASSWORD and api_key != APP_PASSWORD:
-        raise HTTPException(status_code=403, detail="Acceso Denegado")
-    return api_key
-
 def detectar_mime_real(nombre: str, mime: str) -> str:
     if nombre.endswith('.opus'): return 'audio/ogg'
     return mimetypes.guess_type(nombre)[0] or mime
@@ -73,7 +129,7 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
-    print("🚀 Iniciando Sistema v18.6 (Core Optimizado)...")
+    print("🚀 Iniciando Sistema v19.0 (Con Auth Completa)...")
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
@@ -89,7 +145,7 @@ app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 # ======================================================================
-# 🧠 LÓGICA DE IA (EL PORTERO Y EL ANALISTA)
+# 🧠 LÓGICA DE IA (Actualizada para recibir usuario_id)
 # ======================================================================
 
 async def clasificar_intencion_portero(mensaje: str) -> Dict:
@@ -119,10 +175,11 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
     except:
         return {"tipo": "VALOR" if len(mensaje) > 15 else "BASURA"}
 
-async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: str = "webhook") -> Dict:
+async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_id: str, origen: str = "webhook") -> Dict:
     """
     Esto SOLO se ejecuta si el mensaje es IMPORTANTE (VALOR).
     Guarda el análisis y crea alertas con ETIQUETAS.
+    🔑 AHORA USA EL ID DE USUARIO REAL.
     """
     if not supabase: return {"status": "error"}
 
@@ -154,9 +211,9 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
-        # 1. GUARDAR CONVERSACIÓN
+        # 1. GUARDAR CONVERSACIÓN (Asociada al usuario real)
         datos_conv = {
-            "usuario_id": USUARIO_ID_MVP,
+            "usuario_id": usuario_id,  # 👈 ID REAL
             "resumen": analisis['resumen_guardar'], 
             "tipo": analisis['tipo_evento'],
             "urgencia": clasificacion.get('urgencia', 'BAJA'),
@@ -166,13 +223,13 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
         conv_id = res_conv.data[0]['id']
         
-        # 2. CREAR ALERTAS
+        # 2. CREAR ALERTAS (Asociadas al usuario real)
         alertas_creadas = 0
         if analisis.get('tareas'):
             alertas = []
             for t in analisis['tareas']:
                 alertas.append({
-                    "usuario_id": USUARIO_ID_MVP,
+                    "usuario_id": usuario_id, # 👈 ID REAL
                     "conversacion_id": conv_id,
                     "titulo": t['titulo'],
                     "descripcion": t.get('descripcion', f"Derivado de: {analisis['resumen_guardar']}"),
@@ -195,10 +252,10 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         print(f"Error procesando valor: {e}")
         return {"status": "error", "respuesta": f"Error: {str(e)}"}
 
-async def crear_tarea_directa(mensaje: str) -> Dict:
+async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     Crea una alerta directa (Intención TAREA).
-    CORRECCIÓN: Ahora extrae una descripción rica en detalles.
+    🔑 AHORA USA EL ID DE USUARIO REAL.
     """
     prompt = f"""
     Actúa como asistente personal experto.
@@ -222,11 +279,11 @@ async def crear_tarea_directa(mensaje: str) -> Dict:
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data = json.loads(resp.text)
         
-        # Insertamos con la descripción rica generada por la IA
+        # Insertamos con usuario_id real
         supabase.table('alertas').insert({
-            "usuario_id": USUARIO_ID_MVP,
+            "usuario_id": usuario_id, # 👈 ID REAL
             "titulo": data['titulo'],
-            "descripcion": data.get('descripcion', mensaje), # Fallback al mensaje original si falla
+            "descripcion": data.get('descripcion', mensaje),
             "prioridad": data['prioridad'],
             "tipo": "manual",
             "estado": "pendiente",
@@ -241,18 +298,22 @@ async def crear_tarea_directa(mensaje: str) -> Dict:
         print(f"Error tarea directa: {e}")
         return {"status": "error", "respuesta": "No pude procesar la tarea."}
 
-async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
-    """Responde consultas usando contexto de BD."""
+async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
+    """
+    Responde consultas usando contexto de BD.
+    🔑 AHORA FILTRA POR ID DE USUARIO.
+    """
     if not supabase: return "Error BD"
     
     contexto = ""
     if modo_profundo:
-        res = supabase.table('conversaciones').select('resumen').order('created_at', desc=True).limit(5).execute()
+        # Traer historial SOLO DEL USUARIO ACTUAL
+        res = supabase.table('conversaciones').select('resumen').eq('usuario_id', usuario_id).order('created_at', desc=True).limit(5).execute()
         if res.data:
             contexto = "HISTORIAL:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
     else:
-        # Traemos etiqueta para dar mejores respuestas sobre pendientes
-        res = supabase.table('alertas').select('titulo, etiqueta, descripcion').eq('estado', 'pendiente').execute()
+        # Traer pendientes SOLO DEL USUARIO ACTUAL
+        res = supabase.table('alertas').select('titulo, etiqueta, descripcion').eq('usuario_id', usuario_id).eq('estado', 'pendiente').execute()
         if res.data:
             contexto = "PENDIENTES:\n" + "\n".join([f"- [{a.get('etiqueta','GEN')}] {a['titulo']} ({a.get('descripcion','')})" for a in res.data])
     
@@ -261,49 +322,87 @@ async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
     return model.generate_content(prompt).text
 
 # ======================================================================
-# 🚀 ENDPOINTS API
+# 🚀 ENDPOINTS API (PROTEGIDOS CON AUTH)
 # ======================================================================
 
-@app.post("/chat", dependencies=[Depends(verificar_llave)])
-async def chat_endpoint(entrada: MensajeEntrada):
-    """Endpoint principal para la App."""
+@app.post("/chat")
+async def chat_endpoint(
+    entrada: MensajeEntrada,
+    usuario_id: str = Depends(obtener_usuario_actual) # 👈 SE REQUIERE TOKEN
+):
+    """
+    Endpoint principal para la App.
+    Requiere que Flutter envíe el Token en Headers.
+    """
     decision = await clasificar_intencion_portero(entrada.mensaje)
     
     if decision['tipo'] == 'TAREA':
-        res = await crear_tarea_directa(entrada.mensaje)
+        res = await crear_tarea_directa(entrada.mensaje, usuario_id)
         return {"respuesta": res['respuesta']}
     elif decision['tipo'] == 'VALOR': 
-         res = await procesar_informacion_valor(entrada.mensaje, decision, "app_manual")
+         res = await procesar_informacion_valor(entrada.mensaje, decision, usuario_id, "app_manual")
          return {"respuesta": res['respuesta'], "alertas_generadas": res.get('alertas_generadas', 0)}
     else:
-        respuesta = await procesar_consulta_rapida(entrada.mensaje, entrada.modo_profundo)
+        respuesta = await procesar_consulta_rapida(entrada.mensaje, usuario_id, entrada.modo_profundo)
         return {"respuesta": respuesta}
 
-@app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
-async def analizar_archivos(files: List[UploadFile] = File(...)):
+@app.post("/api/analizar")
+async def analizar_archivos(
+    files: List[UploadFile] = File(...),
+    usuario_id: str = Depends(obtener_usuario_actual) # 👈 SE REQUIERE TOKEN
+):
+    """
+    Analizar archivos. 
+    Requiere autenticación para saber a quién guardar la data.
+    """
     texto = ""
     for f in files:
         c = await f.read()
         texto += f"\n{c.decode('utf-8', errors='ignore')}"
     
-    res = await procesar_informacion_valor(texto[:30000], {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}, "app_archivo")
+    res = await procesar_informacion_valor(texto[:30000], {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}, usuario_id, "app_archivo")
     return {"status": "success", "data": res}
 
-@app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
-async def obtener_alertas(estado: str = "pendiente"):
+@app.get("/api/alertas")
+async def obtener_alertas(
+    estado: str = "pendiente",
+    usuario_id: str = Depends(obtener_usuario_actual) # 👈 SE REQUIERE TOKEN
+):
+    """
+    Obtener alertas.
+    Solo devuelve las alertas que pertenecen al usuario autenticado.
+    """
     if not supabase: return {"alertas": []}
-    q = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
-    if estado != "todas": q = q.eq('estado', estado)
+    
+    q = supabase.table('alertas').select('*').eq('usuario_id', usuario_id).order('created_at', desc=True)
+    
+    if estado != "todas": 
+        q = q.eq('estado', estado)
+    
     return {"alertas": q.execute().data}
 
-@app.patch("/api/alertas/{alerta_id}", dependencies=[Depends(verificar_llave)])
-async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
+@app.patch("/api/alertas/{alerta_id}")
+async def actualizar_alerta(
+    alerta_id: str, 
+    body: ActualizarAlerta,
+    usuario_id: str = Depends(obtener_usuario_actual) # 👈 SE REQUIERE TOKEN
+):
     """
-    CORRECCIÓN: Ahora permite actualizar ESTADO y ETIQUETA dinámicamente.
+    Actualizar una alerta específica.
+    Verifica que la alerta pertenezca al usuario antes de modificarla.
     """
     if not supabase: return {"status": "error"}
     
-    # Construimos dinámicamente qué campos actualizar
+    # 1. Verificar propiedad de la alerta
+    alerta_existente = supabase.table('alertas').select('usuario_id').eq('id', alerta_id).execute()
+    
+    if not alerta_existente.data:
+        raise HTTPException(status_code=404, detail="Alerta no encontrada")
+        
+    if alerta_existente.data[0]['usuario_id'] != usuario_id:
+        raise HTTPException(status_code=403, detail="No tienes permiso para modificar esta alerta")
+    
+    # 2. Construir datos a actualizar
     datos_actualizar = {}
     if body.estado: datos_actualizar['estado'] = body.estado
     if body.etiqueta: datos_actualizar['etiqueta'] = body.etiqueta
@@ -314,12 +413,20 @@ async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
     res = supabase.table('alertas').update(datos_actualizar).eq('id', alerta_id).execute()
     return {"status": "success", "data": res.data}
 
-# 🔥 WEBHOOK WHATSAPP 🔥
+# 🔥 WEBHOOK WHATSAPP (SIN AUTH - PÚBLICO)
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request):
+    """
+    Este endpoint es PÚBLICO porque Twilio no tiene nuestro Token JWT.
+    Aquí se gestiona por número de teléfono (pendiente de implementar búsqueda).
+    """
     form_data = await request.form()
     data = dict(form_data)
     mensaje = data.get('Body', '').strip()
+    
+    # ID Genérico para webhooks (Twilio) ya que no tenemos login ahí todavía
+    # En el futuro, buscaríamos el usuario por su número 'From'
+    usuario_id_webhook = "00000000-0000-0000-0000-000000000000" 
     
     if not mensaje: 
         return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
@@ -329,9 +436,9 @@ async def webhook_whatsapp(request: Request):
     tipo = decision.get('tipo', 'BASURA')
     
     if tipo == "VALOR":
-        await procesar_informacion_valor(mensaje, decision, "whatsapp_webhook")
+        await procesar_informacion_valor(mensaje, decision, usuario_id_webhook, "whatsapp_webhook")
     elif tipo == "TAREA":
-        await crear_tarea_directa(mensaje)
+        await crear_tarea_directa(mensaje, usuario_id_webhook)
 
     return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
 
