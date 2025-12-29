@@ -1,6 +1,5 @@
 # ====================================================
-# WHATSAPP IA 18.5 - EL PORTERO INTELIGENTE + AUTO-ETIQUETADO
-# Arquitectura: Filtro de Valor + Twilio + Alertas + Categorización
+# WHATSAPP IA 18.6 - CORE: ETIQUETADO PERSISTENTE + DESCRIPCIONES RICAS
 # ====================================================
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
@@ -50,13 +49,15 @@ header_scheme = APIKeyHeader(name="x-api-key")
 # ID DE USUARIO POR DEFECTO (MVP)
 USUARIO_ID_MVP = "00000000-0000-0000-0000-000000000000"
 
-# --- MODELOS DE DATOS ---
+# --- MODELOS DE DATOS (ACTUALIZADOS) ---
 class MensajeEntrada(BaseModel):
     mensaje: str
     modo_profundo: bool = False
 
 class ActualizarAlerta(BaseModel):
-    estado: str # 'pendiente', 'completada', 'descartada'
+    # CORRECCIÓN: Ahora aceptamos opcionalmente ambos campos para que el PATCH funcione
+    estado: Optional[str] = None 
+    etiqueta: Optional[str] = None 
 
 # --- FUNCIONES DE SOPORTE ---
 async def verificar_llave(api_key: str = Depends(header_scheme)):
@@ -72,7 +73,7 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
-    print("🚀 Iniciando Sistema v18.5 (Portero con Etiquetas)...")
+    print("🚀 Iniciando Sistema v18.6 (Core Optimizado)...")
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
@@ -85,7 +86,7 @@ async def lifespan(app: FastAPI):
     print("👋 Apagando sistema")
 
 app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 # ======================================================================
 # 🧠 LÓGICA DE IA (EL PORTERO Y EL ANALISTA)
@@ -94,16 +95,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def clasificar_intencion_portero(mensaje: str) -> Dict:
     """
     EL PORTERO: Decide si el mensaje vale la pena o es basura.
-    (Mantenemos lógica original para no romper el flujo de entrada)
     """
     prompt = f"""
     Analiza el mensaje de WhatsApp y clasifica su VALOR PARA GUARDAR.
     MENSAJE: "{mensaje}"
 
     TIPOS:
-    - BASURA: Saludos ("Hola", "Buenos días"), agradecimientos ("Gracias", "Ok"), confirmaciones simples o preguntas de gestión ("¿Qué tengo pendiente?"). -> NO GUARDAR EN BD.
-    - VALOR: Información sobre clientes, proyectos, acuerdos, reclamos, datos nuevos, cotizaciones. -> GUARDAR Y ANALIZAR.
-    - TAREA: Orden directa de crear recordatorio o tarea ("Recuérdame llamar a Ana", "Agendar reunión"). -> CREAR ALERTA (NO GUARDAR CHARLA).
+    - BASURA: Saludos ("Hola"), agradecimientos ("Gracias"), preguntas de gestión. -> NO GUARDAR EN BD.
+    - VALOR: Información sobre clientes, proyectos, acuerdos, datos nuevos. -> GUARDAR Y ANALIZAR.
+    - TAREA: Orden directa de crear recordatorio o tarea ("Recuérdame...", "Agendar..."). -> CREAR ALERTA.
 
     JSON Schema:
     {{
@@ -117,41 +117,34 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except:
-        # Fallback: Si es muy corto (<15 chars) es basura, si no asumimos valor por seguridad
         return {"tipo": "VALOR" if len(mensaje) > 15 else "BASURA"}
 
 async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: str = "webhook") -> Dict:
     """
     Esto SOLO se ejecuta si el mensaje es IMPORTANTE (VALOR).
-    Guarda el análisis profesional y crea alertas con ETIQUETAS AUTOMÁTICAS.
+    Guarda el análisis y crea alertas con ETIQUETAS.
     """
     if not supabase: return {"status": "error"}
 
-    # --- CAMBIO: Prompt actualizado para incluir 'etiqueta' en las tareas ---
     prompt = f"""
-    Analiza esta información valiosa recibida por WhatsApp.
-    MENSAJE ORIGINAL: "{mensaje}"
-    CONTEXTO DETECTADO: {clasificacion.get('subtipo')}
+    Analiza esta información valiosa.
+    MENSAJE: "{mensaje}"
+    CONTEXTO: {clasificacion.get('subtipo')}
     
     INSTRUCCIONES:
-    1. Genera un RESUMEN PROFESIONAL de lo que pasó (para guardar en historial).
-    2. Detecta si hay TAREAS derivadas.
-    3. Para cada tarea, asigna una ETIQUETA obligatoria entre: [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, HOGAR].
-       - "PAREJA": Todo lo romántico, citas, aniversarios.
-       - "NEGOCIO": Clientes, pagos, proyectos.
-       - "SALUD": Médicos, medicinas, deporte.
-       - "PERSONAL": Trámites propios, ocio individual.
+    1. Genera un RESUMEN PROFESIONAL.
+    2. Detecta TAREAS y asigna ETIQUETA: [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
     
     JSON Schema:
     {{
-        "resumen_guardar": "Texto profesional resumido del evento",
+        "resumen_guardar": "Texto profesional resumido",
         "tipo_evento": "reunion | acuerdo | dato_cliente | reclamo | venta",
         "tareas": [
             {{ 
                 "titulo": "...", 
                 "prioridad": "ALTA/MEDIA", 
-                "descripcion": "...", 
-                "etiqueta": "NEGOCIO" | "ESTUDIO" | "PAREJA" | "SALUD" | "PERSONAL" | "HOGAR" 
+                "descripcion": "Detalles completos (hora, lugar, personas)", 
+                "etiqueta": "NEGOCIO" | "ESTUDIO" | "PAREJA" | "SALUD" | "PERSONAL" | "OTROS" 
             }}
         ]
     }}
@@ -161,7 +154,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
-        # 1. GUARDAR SOLO EL ANÁLISIS (Limpieza de datos - Código Original mantenido)
+        # 1. GUARDAR CONVERSACIÓN
         datos_conv = {
             "usuario_id": USUARIO_ID_MVP,
             "resumen": analisis['resumen_guardar'], 
@@ -173,7 +166,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
         conv_id = res_conv.data[0]['id']
         
-        # 2. CREAR ALERTAS SI HAY (Con Etiqueta)
+        # 2. CREAR ALERTAS
         alertas_creadas = 0
         if analisis.get('tareas'):
             alertas = []
@@ -186,7 +179,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
                     "prioridad": t['prioridad'],
                     "tipo": "auto_detectada",
                     "estado": "pendiente",
-                    "etiqueta": t.get('etiqueta', 'PERSONAL') # --- CAMBIO: Campo nuevo
+                    "etiqueta": t.get('etiqueta', 'OTROS')
                 })
             supabase.table('alertas').insert(alertas).execute()
             alertas_creadas = len(alertas)
@@ -203,14 +196,25 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, origen: 
         return {"status": "error", "respuesta": f"Error: {str(e)}"}
 
 async def crear_tarea_directa(mensaje: str) -> Dict:
-    """Crea una alerta directa sin guardar conversación (Intención TAREA)."""
-    # --- CAMBIO: Prompt actualizado para inferir etiqueta en tarea directa ---
+    """
+    Crea una alerta directa (Intención TAREA).
+    CORRECCIÓN: Ahora extrae una descripción rica en detalles.
+    """
     prompt = f"""
-    Extrae tarea de: '{mensaje}'. 
-    JSON Schema: {{
+    Actúa como asistente personal experto.
+    Extrae una tarea estructurada del mensaje del usuario: '{mensaje}'.
+    
+    INSTRUCCIONES CLAVE:
+    1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
+    2. 'descripcion': DEBE contener todos los detalles clave encontrados: HORA exacta, LUGAR, FECHA, NOMBRES y CONTEXTO (Ej: "Cirugía estómago. Hora cita: 8am. Alarma solicitada: 6am").
+    3. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
+    
+    JSON Schema: 
+    {{
         'titulo': '...', 
-        'prioridad': 'ALTA/MEDIA/BAJA',
-        'etiqueta': 'NEGOCIO' | 'ESTUDIO' | 'PAREJA' | 'SALUD' | 'PERSONAL' | 'HOGAR'
+        'descripcion': '...',
+        'prioridad': 'ALTA' | 'MEDIA' | 'BAJA',
+        'etiqueta': '...'
     }}
     """
     try:
@@ -218,35 +222,41 @@ async def crear_tarea_directa(mensaje: str) -> Dict:
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data = json.loads(resp.text)
         
+        # Insertamos con la descripción rica generada por la IA
         supabase.table('alertas').insert({
             "usuario_id": USUARIO_ID_MVP,
             "titulo": data['titulo'],
-            "descripcion": "Creada vía WhatsApp",
+            "descripcion": data.get('descripcion', mensaje), # Fallback al mensaje original si falla
             "prioridad": data['prioridad'],
             "tipo": "manual",
             "estado": "pendiente",
-            "etiqueta": data.get('etiqueta', 'PERSONAL') # --- CAMBIO: Campo nuevo
+            "etiqueta": data.get('etiqueta', 'OTROS')
         }).execute()
-        return {"status": "tarea_creada", "respuesta": f"✅ Tarea creada: {data['titulo']} ({data.get('etiqueta', 'PERSONAL')})"}
-    except:
-        return {"status": "error"}
+        
+        return {
+            "status": "tarea_creada", 
+            "respuesta": f"✅ Tarea: {data['titulo']} \n📂 {data.get('etiqueta','OTROS')} \n📝 {data.get('descripcion','')}"
+        }
+    except Exception as e:
+        print(f"Error tarea directa: {e}")
+        return {"status": "error", "respuesta": "No pude procesar la tarea."}
 
 async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
-    """Responde consultas sin guardar nada en BD."""
+    """Responde consultas usando contexto de BD."""
     if not supabase: return "Error BD"
     
     contexto = ""
     if modo_profundo:
         res = supabase.table('conversaciones').select('resumen').order('created_at', desc=True).limit(5).execute()
         if res.data:
-            contexto = "HISTORIAL RELEVANTE:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
+            contexto = "HISTORIAL:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
     else:
-        # --- CAMBIO: Traemos también la etiqueta para dar contexto en las respuestas ---
-        res = supabase.table('alertas').select('titulo, etiqueta').eq('estado', 'pendiente').execute()
+        # Traemos etiqueta para dar mejores respuestas sobre pendientes
+        res = supabase.table('alertas').select('titulo, etiqueta, descripcion').eq('estado', 'pendiente').execute()
         if res.data:
-            contexto = "TUS PENDIENTES:\n" + "\n".join([f"- [{a.get('etiqueta','GEN')}] {a['titulo']}" for a in res.data])
+            contexto = "PENDIENTES:\n" + "\n".join([f"- [{a.get('etiqueta','GEN')}] {a['titulo']} ({a.get('descripcion','')})" for a in res.data])
     
-    prompt = f"Actúa como asistente. DATOS: {contexto}. PREGUNTA: {mensaje}. Responde breve."
+    prompt = f"Actúa como asistente. DATOS: {contexto}. PREGUNTA: {mensaje}. Responde breve y útil."
     model = genai.GenerativeModel(MODELO_IA)
     return model.generate_content(prompt).text
 
@@ -256,8 +266,7 @@ async def procesar_consulta_rapida(mensaje: str, modo_profundo: bool) -> str:
 
 @app.post("/chat", dependencies=[Depends(verificar_llave)])
 async def chat_endpoint(entrada: MensajeEntrada):
-    """Endpoint para la App Flutter (Consulta directa)."""
-    # Si viene de la App, asumimos que es una CONSULTA o una orden directa.
+    """Endpoint principal para la App."""
     decision = await clasificar_intencion_portero(entrada.mensaje)
     
     if decision['tipo'] == 'TAREA':
@@ -272,36 +281,42 @@ async def chat_endpoint(entrada: MensajeEntrada):
 
 @app.post("/api/analizar", dependencies=[Depends(verificar_llave)])
 async def analizar_archivos(files: List[UploadFile] = File(...)):
-    """Si subes archivo manual, asumimos que ES DE VALOR."""
     texto = ""
     for f in files:
         c = await f.read()
         texto += f"\n{c.decode('utf-8', errors='ignore')}"
     
-    # Forzamos procesamiento como valor
     res = await procesar_informacion_valor(texto[:30000], {"subtipo": "analisis_archivo", "urgencia": "MEDIA"}, "app_archivo")
     return {"status": "success", "data": res}
 
 @app.get("/api/alertas", dependencies=[Depends(verificar_llave)])
 async def obtener_alertas(estado: str = "pendiente"):
     if not supabase: return {"alertas": []}
-    # --- CAMBIO: Aseguramos traer la columna etiqueta si existe ---
     q = supabase.table('alertas').select('*').eq('usuario_id', USUARIO_ID_MVP).order('created_at', desc=True)
     if estado != "todas": q = q.eq('estado', estado)
     return {"alertas": q.execute().data}
 
 @app.patch("/api/alertas/{alerta_id}", dependencies=[Depends(verificar_llave)])
 async def actualizar_alerta(alerta_id: str, body: ActualizarAlerta):
+    """
+    CORRECCIÓN: Ahora permite actualizar ESTADO y ETIQUETA dinámicamente.
+    """
     if not supabase: return {"status": "error"}
-    res = supabase.table('alertas').update({'estado': body.estado}).eq('id', alerta_id).execute()
+    
+    # Construimos dinámicamente qué campos actualizar
+    datos_actualizar = {}
+    if body.estado: datos_actualizar['estado'] = body.estado
+    if body.etiqueta: datos_actualizar['etiqueta'] = body.etiqueta
+    
+    if not datos_actualizar:
+        return {"status": "no_change", "msg": "No se enviaron datos para actualizar"}
+
+    res = supabase.table('alertas').update(datos_actualizar).eq('id', alerta_id).execute()
     return {"status": "success", "data": res.data}
 
-# 🔥 WEBHOOK INTELIGENTE (EL PORTERO V18) 🔥
+# 🔥 WEBHOOK WHATSAPP 🔥
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request):
-    """
-    Recibe WhatsApp -> Clasifica -> Decide si guardar o no.
-    """
     form_data = await request.form()
     data = dict(form_data)
     mensaje = data.get('Body', '').strip()
@@ -309,27 +324,15 @@ async def webhook_whatsapp(request: Request):
     if not mensaje: 
         return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
-    print(f"📩 WhatsApp recibido: {mensaje}")
-    
-    # 1. EL PORTERO DECIDE
+    print(f"📩 WhatsApp: {mensaje}")
     decision = await clasificar_intencion_portero(mensaje)
     tipo = decision.get('tipo', 'BASURA')
     
-    print(f"🧠 Decisión del Portero: {tipo}")
-    
-    if tipo == "BASURA":
-        print("🗑️ Mensaje descartado (No se guarda en BD).")
-        # No guardamos nada. Silencio absoluto en la DB.
-        
-    elif tipo == "VALOR":
-        print("💎 Información valiosa detectada. Procesando...")
+    if tipo == "VALOR":
         await procesar_informacion_valor(mensaje, decision, "whatsapp_webhook")
-        
     elif tipo == "TAREA":
-        print("📌 Solicitud de tarea detectada. Creando alerta...")
         await crear_tarea_directa(mensaje)
 
-    # Respuesta vacía a Twilio para confirmar recepción
     return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
 
 if __name__ == "__main__":
