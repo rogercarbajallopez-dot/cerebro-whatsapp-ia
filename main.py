@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 import jwt  # Se mantiene por compatibilidad con el archivo original
+from datetime import datetime, timedelta
+import pytz
 
 # 1. CARGA DE SECRETOS
 load_dotenv()
@@ -102,6 +104,12 @@ class ActualizarAlerta(BaseModel):
     etiqueta: Optional[str] = None 
 
 # --- FUNCIONES DE SOPORTE ---
+def obtener_fecha_contexto():
+    """Retorna la fecha y hora actual en Lima/Perú para que la IA se ubique."""
+    zona_peru = pytz.timezone('America/Lima')
+    ahora = datetime.now(zona_peru)
+    return ahora.strftime("%Y-%m-%d %H:%M:%S") + f" (Día: {ahora.strftime('%A')})"
+
 def detectar_mime_real(nombre: str, mime: str) -> str:
     if nombre.endswith('.opus'): return 'audio/ogg'
     return mimetypes.guess_type(nombre)[0] or mime
@@ -131,21 +139,36 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 async def clasificar_intencion_portero(mensaje: str) -> Dict:
     """
-    EL PORTERO: Decide si el mensaje vale la pena o es basura.
+    EL PORTERO: Clasifica la intención para decidir si GUARDAR (BD) o solo RESPONDER.
     """
     prompt = f"""
-    Analiza el mensaje de WhatsApp y clasifica su VALOR PARA GUARDAR.
+    Eres el cerebro clasificador de un Asistente Personal.
+    Tu única misión es etiquetar el mensaje entrante según su utilidad para la Base de Datos.
+    
     MENSAJE: "{mensaje}"
+    
+    CATEGORÍAS (Selecciona con precisión):
+    
+    1. BASURA (Chat Efímero / General): 
+       - Saludos ("Hola", "Buenas noches"), agradecimientos ("Gracias").
+       - Preguntas de cultura general o noticias ("¿Quién ganó el mundial?", "¿Qué es el estoicismo?").
+       - Conversación casual sin datos personales.
+       -> ACCIÓN SISTEMA: NO GUARDAR (Responder usando conocimiento general).
 
-    TIPOS:
-    - BASURA: Saludos ("Hola"), agradecimientos ("Gracias"), preguntas de gestión. -> NO GUARDAR EN BD.
-    - VALOR: Información sobre clientes, proyectos, acuerdos, datos nuevos. -> GUARDAR Y ANALIZAR.
-    - TAREA: Orden directa de crear recordatorio o tarea ("Recuérdame...", "Agendar..."). -> CREAR ALERTA.
+    2. TAREA (Acción o Evento Futuro):
+       - Órdenes directas ("Recuérdame pagar la luz").
+       - Declaración de compromisos o citas ("Mañana tengo dentista a las 5", "El lunes viajo").
+       -> ACCIÓN SISTEMA: CREAR ALERTA/RECORDATORIO.
 
-    JSON Schema:
+    3. VALOR (Memoria y Perfilado):
+       - El usuario cuenta algo de su vida, gustos, familia o trabajo ("Soy alérgico a las nueces", "Mi jefe se llama Carlos").
+       - Conversaciones profundas, archivos adjuntos o textos largos.
+       -> ACCIÓN SISTEMA: GUARDAR, RESUMIR Y ACTUALIZAR PERFIL.
+
+    Responde SOLO el JSON:
     {{
         "tipo": "BASURA" | "VALOR" | "TAREA",
-        "subtipo": "saludo | consulta | venta | reclamo | recordatorio",
+        "subtipo": "chat_general | dato_personal | evento_pendiente",
         "urgencia": "ALTA | MEDIA | BAJA"
     }}
     """
@@ -154,95 +177,173 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except:
-        return {"tipo": "VALOR" if len(mensaje) > 15 else "BASURA"}
+        # Fallback de seguridad: Si es largo, asumimos que es VALOR para no perder info.
+        return {"tipo": "VALOR" if len(mensaje) > 20 else "BASURA"}
+
+from datetime import datetime
+import json
+import google.generativeai as genai
+
+# Asumo que 'supabase', 'genai' y 'MODELO_IA' ya están inicializados globalmente
 
 async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_id: str, origen: str = "webhook") -> Dict:
     """
-    Esto SOLO se ejecuta si el mensaje es IMPORTANTE (VALOR).
-    Guarda el análisis y crea alertas con ETIQUETAS.
+    Motor de Análisis: 
+    1. Resumen (Histórico).
+    2. Perfilado (Memoria a largo plazo en 'perfil_usuario').
+    3. Tareas (Alertas en 'alertas').
     """
-    if not supabase: return {"status": "error"}
+    if not supabase: return {"status": "error", "respuesta": "Error de conexión BD"}
 
+    # 1. Contexto Temporal EXACTO (Perú)
+    # Esto es vital para que "mañana" se calcule bien.
+    zona_horaria = pytz.timezone('America/Lima')
+    fecha_obj = datetime.now(zona_horaria)
+    fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)") # Ej: 2026-01-05 16:30:00 (Lunes)
+
+    # 2. Prompt Optimizado (Preservando tu estructura original pero con objetivos claros)
     prompt = f"""
-    Analiza esta información valiosa.
-    MENSAJE: "{mensaje}"
-    CONTEXTO: {clasificacion.get('subtipo')}
+    Actúa como un Asistente de Inteligencia Artificial Avanzada (Backend).
+    Estás procesando información entrante de una conversación.
     
-    INSTRUCCIONES:
-    1. Genera un RESUMEN PROFESIONAL.
-    2. Detecta TAREAS y asigna ETIQUETA: [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
+    CONTEXTO:
+    - Fecha y Hora actual (Lima, Perú): {fecha_actual}
+    - Subtipo detectado: {clasificacion.get('subtipo')}
+    
+    TEXTO A ANALIZAR: "{mensaje}"
+    
+    TUS 3 OBJETIVOS:
+    1. RESUMEN: Sintetiza lo ocurrido o acordado (Datos duros).
+    2. PERFILADO (MEMORIA): Extrae datos ATEMPORALES sobre el usuario (Gustos, trabajo, familia, salud). 
+       - Solo guarda datos permanentes.
+       - Si no hay nada nuevo sobre la identidad del usuario, deja la lista vacía.
+    3. TAREAS: Detecta acciones pendientes.
+       - IMPORTANTE: Si dice "mañana", calcula la fecha exacta basándote en que HOY es {fecha_actual}.
     
     JSON Schema:
     {{
         "resumen_guardar": "Texto profesional resumido",
-        "tipo_evento": "reunion | acuerdo | dato_cliente | reclamo | venta",
+        "tipo_evento": "reunion | acuerdo | dato_cliente | personal | salud | otro",
+        "aprendizajes_usuario": ["Dato 1", "Dato 2"],
         "tareas": [
             {{ 
-                "titulo": "...", 
-                "prioridad": "ALTA/MEDIA", 
-                "descripcion": "Detalles completos (hora, lugar, personas)", 
+                "titulo": "Acción corta", 
+                "prioridad": "ALTA" | "MEDIA" | "BAJA", 
+                "descripcion": "Incluye FECHA EXACTA calculada y detalles", 
                 "etiqueta": "NEGOCIO" | "ESTUDIO" | "PAREJA" | "SALUD" | "PERSONAL" | "OTROS" 
             }}
         ]
     }}
     """
+
     try:
+        # 3. Inferencia con Gemini
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analisis = json.loads(resp.text)
         
-        # 1. GUARDAR CONVERSACIÓN
+        # 4. GUARDAR CONVERSACIÓN (Historial)
         datos_conv = {
             "usuario_id": usuario_id,
-            "resumen": analisis['resumen_guardar'], 
-            "tipo": analisis['tipo_evento'],
+            "resumen": analisis.get('resumen_guardar', 'Información procesada'), 
+            "tipo": analisis.get('tipo_evento', 'otro'),
             "urgencia": clasificacion.get('urgencia', 'BAJA'),
-            "metadata": {"raw_msg": mensaje if len(mensaje) < 200 else mensaje[:200] + "..."}, 
-            "plataforma": origen
+            "plataforma": origen,
+            "metadata": {
+                "raw_msg": mensaje if len(mensaje) < 1000 else mensaje[:1000] + "...",
+                "nuevos_conocimientos": analisis.get('aprendizajes_usuario', [])
+            }
         }
         res_conv = supabase.table('conversaciones').insert(datos_conv).execute()
-        conv_id = res_conv.data[0]['id']
         
-        # 2. CREAR ALERTAS
+        # Obtenemos el ID de la conversación recién creada para vincular la memoria
+        conv_id = res_conv.data[0]['id'] if res_conv.data else None
+        
+        # ==============================================================================
+        # 5. BLOQUE DE MEMORIA (PERFILADO)
+        # ==============================================================================
+        nuevos_datos = analisis.get('aprendizajes_usuario', [])
+        memoria_guardada = 0
+        
+        if nuevos_datos:
+            datos_perfil = []
+            for dato in nuevos_datos:
+                datos_perfil.append({
+                    "usuario_id": usuario_id,
+                    "dato": dato,                # Lo que aprendió la IA
+                    "categoria": "AUTO_IA",      # Etiqueta automática
+                    "origen": f"conv_{conv_id}"  # Trazabilidad
+                })
+            
+            # Upsert: Evita duplicados si la IA aprende lo mismo dos veces
+            try:
+                supabase.table('perfil_usuario').upsert(
+                    datos_perfil, 
+                    on_conflict="usuario_id, dato"
+                ).execute()
+                memoria_guardada = len(datos_perfil)
+            except Exception as e_mem:
+                print(f"⚠️ Nota Memoria: {e_mem}")
+
+        # ==============================================================================
+
+        # 6. CREAR ALERTAS (TAREAS)
         alertas_creadas = 0
-        if analisis.get('tareas'):
+        tareas_detectadas = analisis.get('tareas', [])
+        
+        if tareas_detectadas:
             alertas = []
-            for t in analisis['tareas']:
+            for t in tareas_detectadas:
                 alertas.append({
                     "usuario_id": usuario_id,
                     "conversacion_id": conv_id,
-                    "titulo": t['titulo'],
+                    "titulo": t.get('titulo', 'Recordatorio'),
                     "descripcion": t.get('descripcion', f"Derivado de: {analisis['resumen_guardar']}"),
-                    "prioridad": t['prioridad'],
+                    "prioridad": t.get('prioridad', 'MEDIA'),
                     "tipo": "auto_detectada",
                     "estado": "pendiente",
                     "etiqueta": t.get('etiqueta', 'OTROS')
                 })
-            supabase.table('alertas').insert(alertas).execute()
-            alertas_creadas = len(alertas)
+            
+            if alertas:
+                supabase.table('alertas').insert(alertas).execute()
+                alertas_creadas = len(alertas)
+
+        # 7. Retorno final
+        feedback_extra = f"\n🧠 Aprendí {memoria_guardada} cosas nuevas." if memoria_guardada > 0 else ""
 
         return {
             "status": "guardado", 
             "resumen": analisis['resumen_guardar'], 
             "alertas_generadas": alertas_creadas,
-            "respuesta": f"✅ Info guardada: {analisis['resumen_guardar']}"
+            "aprendizajes": memoria_guardada,
+            "respuesta": f"✅ Info guardada: {analisis['resumen_guardar']}{feedback_extra}"
         }
         
     except Exception as e:
-        print(f"Error procesando valor: {e}")
-        return {"status": "error", "respuesta": f"Error: {str(e)}"}
+        print(f"❌ Error procesando valor: {e}")
+        return {"status": "error", "respuesta": f"Error procesando: {str(e)}"}
 
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     Crea una alerta directa (Intención TAREA).
     """
+    # 1. MODIFICACIÓN: Obtenemos la fecha exacta en Lima, Perú
+    # Esto garantiza que si es de noche, 'mañana' se calcule bien.
+    zona_horaria = pytz.timezone('America/Lima')
+    fecha_obj = datetime.now(zona_horaria)
+    fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)") # Ej: 2026-01-05 (Lunes)
+
     prompt = f"""
     Actúa como asistente personal experto.
+    HOY ES: {fecha_actual}.
+    
     Extrae una tarea estructurada del mensaje del usuario: '{mensaje}'.
     
     INSTRUCCIONES CLAVE:
     1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
-    2. 'descripcion': DEBE contener todos los detalles clave encontrados: HORA exacta, LUGAR, FECHA, NOMBRES y CONTEXTO (Ej: "Cirugía estómago. Hora cita: 8am. Alarma solicitada: 6am").
+    2. 'descripcion': DEBE contener todos los detalles clave encontrados: HORA exacta, LUGAR, NOMBRES y CONTEXTO. 
+       IMPORTANTE: Si el usuario dice fechas relativas (ej: "Mañana", "El viernes"), CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA en la descripción.
     3. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
     
     JSON Schema: 
@@ -258,7 +359,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data = json.loads(resp.text)
         
-        # Insertamos con usuario_id real
+        # Insertamos con usuario_id real (Mantenemos tu código original de inserción)
         supabase.table('alertas').insert({
             "usuario_id": usuario_id,
             "titulo": data['titulo'],
@@ -279,25 +380,123 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
     """
-    Responde consultas usando contexto de BD.
+    Responde consultas conectando:
+    1. PERFIL (Memoria a Largo Plazo: Quién es el usuario).
+    2. HISTORIAL (Memoria a Corto/Mediano Plazo: Qué ha pasado).
+    3. TAREAS (Agenda: Qué tiene pendiente).
     """
-    if not supabase: return "Error BD"
+    if not supabase: return "Error: No hay conexión a base de datos."
     
-    contexto = ""
-    if modo_profundo:
-        # Traer historial DEL USUARIO ACTUAL
-        res = supabase.table('conversaciones').select('resumen').eq('usuario_id', usuario_id).order('created_at', desc=True).limit(5).execute()
-        if res.data:
-            contexto = "HISTORIAL:\n" + "\n".join([f"- {c['resumen']}" for c in res.data])
-    else:
-        # Traer pendientes DEL USUARIO ACTUAL
-        res = supabase.table('alertas').select('titulo, etiqueta, descripcion').eq('usuario_id', usuario_id).eq('estado', 'pendiente').execute()
-        if res.data:
-            contexto = "PENDIENTES:\n" + "\n".join([f"- [{a.get('etiqueta','GEN')}] {a['titulo']} ({a.get('descripcion','')})" for a in res.data])
+    # Garantizamos la hora Perú para que el contexto temporal sea exacto
+    zona_horaria = pytz.timezone('America/Lima')
+    fecha_obj = datetime.now(zona_horaria)
+    fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)")
     
-    prompt = f"Actúa como asistente. DATOS: {contexto}. PREGUNTA: {mensaje}. Responde breve y útil."
-    model = genai.GenerativeModel(MODELO_IA)
-    return model.generate_content(prompt).text
+    contexto_bd = ""
+
+    try:
+        # ==============================================================================
+        # 1. (NUEVO) RECUPERAR PERFIL DEL USUARIO
+        # Esto es lo que le da "personalidad" y memoria de largo plazo.
+        # ==============================================================================
+        res_perfil = supabase.table('perfil_usuario')\
+            .select('dato')\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        # Formateamos la lista de conocimientos sobre el usuario
+        if res_perfil.data:
+            lista_perfil = [f"- {p['dato']}" for p in res_perfil.data]
+            texto_perfil = "\n".join(lista_perfil)
+        else:
+            texto_perfil = "(Aún no tengo datos personales registrados de este usuario)"
+
+        # ==============================================================================
+        # 2. CONSTRUCCIÓN DE CONTEXTO (Tu lógica original preservada)
+        # ==============================================================================
+        if modo_profundo:
+            # --- MODO PROFUNDO ---
+            # print(f"🔍 Modo Profundo: Analizando historial extenso para {usuario_id}...")
+            
+            res_conv = supabase.table('conversaciones')\
+                .select('resumen, tipo, created_at')\
+                .eq('usuario_id', usuario_id)\
+                .order('created_at', desc=True)\
+                .limit(100)\
+                .execute()
+            
+            res_alertas = supabase.table('alertas')\
+                .select('titulo, estado, etiqueta')\
+                .eq('usuario_id', usuario_id)\
+                .order('created_at', desc=True)\
+                .limit(30)\
+                .execute()
+
+            datos_texto = []
+            if res_conv.data:
+                for c in reversed(res_conv.data):
+                    datos_texto.append(f"- [{c['created_at'][:10]}] ({c.get('tipo','General')}) {c['resumen']}")
+            
+            tareas_hist = [f"- [{a['estado']}] {a['titulo']}" for a in res_alertas.data] if res_alertas.data else []
+            
+            contexto_bd = (
+                f"HISTORIAL CRONOLÓGICO (100 últimos eventos):\n" + "\n".join(datos_texto) + 
+                f"\n\nHISTORIAL DE TAREAS:\n" + "\n".join(tareas_hist)
+            )
+
+        else:
+            # --- MODO RÁPIDO ---
+            res_alertas = supabase.table('alertas')\
+                .select('titulo, descripcion, etiqueta, fecha_limite')\
+                .eq('usuario_id', usuario_id)\
+                .eq('estado', 'pendiente')\
+                .execute()
+            
+            res_recent = supabase.table('conversaciones')\
+                .select('resumen, created_at')\
+                .eq('usuario_id', usuario_id)\
+                .order('created_at', desc=True)\
+                .limit(15)\
+                .execute()
+
+            pendientes_txt = "\n".join([f"- [PENDIENTE] {a['titulo']} ({a.get('descripcion','')})" for a in res_alertas.data]) if res_alertas.data else "No hay pendientes."
+            reciente_txt = "\n".join([f"- [HACE POCO: {c['created_at'][:10]}] {c['resumen']}" for c in res_recent.data]) if res_recent.data else ""
+            
+            contexto_bd = f"PENDIENTES AHORA:\n{pendientes_txt}\n\nCONTEXTO RECIENTE:\n{reciente_txt}"
+
+        # ==============================================================================
+        # 3. CEREBRO DE LA RESPUESTA (Prompt Actualizado con Perfil)
+        # ==============================================================================
+        prompt = f"""
+        Actúa como un Asistente Personal de Inteligencia Artificial altamente eficiente y empático.
+        
+        FECHA ACTUAL: {fecha_actual}
+        
+        CONOCIMIENTO SOBRE EL USUARIO (PERFIL):
+        ---------------------------------------
+        {texto_perfil}
+        ---------------------------------------
+        
+        CONTEXTO / MEMORIA (LO QUE HA PASADO):
+        ---------------------------------------
+        {contexto_bd}
+        ---------------------------------------
+        
+        CONSULTA DEL USUARIO: "{mensaje}"
+        
+        DIRECTRICES DE RESPUESTA:
+        1. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta. (Ej: Si sabes su profesión o familia, tenlo en cuenta).
+        2. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
+        3. TONO: Eres un asistente útil. No inventes tareas. Sé claro y directo.
+        """
+
+        model = genai.GenerativeModel(MODELO_IA)
+        response = model.generate_content(prompt)
+        return response.text
+
+    except Exception as e:
+        print(f"Error en consulta rápida: {e}")
+        return "Lo siento, tuve un problema conectando con tu memoria."
 
 # ======================================================================
 # 🚀 ENDPOINTS API (ACTUALIZADOS CON AUTH)
@@ -309,20 +508,41 @@ async def chat_endpoint(
     usuario_id: str = Depends(obtener_usuario_actual)
 ):
     """
-    Endpoint principal para la App.
-    Ahora requiere autenticación.
+    Cerebro Principal:
+    1. TAREA -> Agenda con fecha calculada.
+    2. VALOR -> Guarda historial y ACTUALIZA PERFIL (Memoria).
+    3. CHAT -> Responde usando contexto, pero no ensucia la BD.
     """
-    decision = await clasificar_intencion_portero(entrada.mensaje)
-    
-    if decision['tipo'] == 'TAREA':
-        res = await crear_tarea_directa(entrada.mensaje, usuario_id)
-        return {"respuesta": res['respuesta']}
-    elif decision['tipo'] == 'VALOR': 
-         res = await procesar_informacion_valor(entrada.mensaje, decision, usuario_id, "app_manual")
-         return {"respuesta": res['respuesta'], "alertas_generadas": res.get('alertas_generadas', 0)}
-    else:
-        respuesta = await procesar_consulta_rapida(entrada.mensaje, usuario_id, entrada.modo_profundo)
-        return {"respuesta": respuesta}
+    try:
+        # 1. El Portero decide la intención (Igual que antes)
+        decision = await clasificar_intencion_portero(entrada.mensaje)
+        
+        # CASO 1: Tarea explícita ("Recuérdame...")
+        if decision['tipo'] == 'TAREA':
+            res = await crear_tarea_directa(entrada.mensaje, usuario_id)
+            return {"respuesta": res['respuesta']}
+            
+        # CASO 2: Información Valiosa ("Te paso el reporte", "Mi hija cumple años el...")
+        elif decision['tipo'] == 'VALOR': 
+             # Llamamos a tu función actualizada que ahora incluye MEMORIA
+             res = await procesar_informacion_valor(entrada.mensaje, decision, usuario_id, "app_manual")
+             
+             # Agregamos 'nuevos_aprendizajes' al retorno por si el Frontend quiere mostrar "¿Sabías que aprendí esto?"
+             return {
+                 "respuesta": res['respuesta'], 
+                 "alertas_generadas": res.get('alertas_generadas', 0),
+                 "nuevos_aprendizajes": res.get('aprendizajes', 0) 
+             }
+             
+        # CASO 3: Chat General / Basura ("Hola", "¿Cómo estás?", "¿Qué tengo pendiente?")
+        else:
+            # Aquí responde dudas usando RAG (Memoria), pero NO guarda el "Hola" en la base de datos
+            respuesta = await procesar_consulta_rapida(entrada.mensaje, usuario_id, entrada.modo_profundo)
+            return {"respuesta": respuesta}
+
+    except Exception as e:
+        print(f"Error crítico en chat_endpoint: {e}")
+        return {"respuesta": "Lo siento, tuve un problema interno procesando tu mensaje. Inténtalo de nuevo."}
 
 @app.post("/api/analizar")
 async def analizar_archivos(
@@ -416,5 +636,6 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
 
 
