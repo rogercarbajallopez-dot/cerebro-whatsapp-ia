@@ -7,6 +7,8 @@ from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
+from google.generativeai.types import content_types
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 import os
 import json
@@ -69,7 +71,7 @@ async def obtener_usuario_actual(
     token = credentials.credentials
     
     try:
-        # 👇 CAMBIO CRÍTICO: Usamos el cliente de Supabase para validar
+        # 1. LÓGICA ORIGINAL (INTACTA): Validamos el token con Supabase Auth
         user_response = supabase.auth.get_user(token)
         
         if not user_response or not user_response.user:
@@ -78,16 +80,50 @@ async def obtener_usuario_actual(
                 detail="Token inválido o expirado"
             )
         
-        # Devolvemos el ID real del usuario autenticado
-        return user_response.user.id
+        # Capturamos los datos reales de la sesión validada
+        user_id = user_response.user.id
+        user_email = user_response.user.email  # Capturamos el email también
+
+        # ==============================================================================
+        # 2. BLOQUE COMPLEMENTARIO (AUTO-SINCRONIZACIÓN)
+        # Objetivo: Solucionar el error de "Foreign Key" sin tocar la lógica del token.
+        # ==============================================================================
+        try:
+            # Verificamos silenciosamente si este ID ya tiene su "casillero" en la tabla pública
+            # Esto evita el error que tenías al guardar tareas.
+            existe_en_db = supabase.table('usuarios').select('id').eq('id', user_id).execute()
+            
+            # Si la lista está vacía, significa que el usuario existe en Auth pero no en la BD
+            if not existe_en_db.data:
+                print(f"🔄 Usuario {user_id} validado, pero faltaba en tabla pública. Sincronizando...")
+                
+                # Lo creamos automáticamente para que no vuelva a fallar
+                supabase.table('usuarios').insert({
+                    "id": user_id,
+                    "email": user_email,
+                    # "created_at": datetime.now().isoformat() # Descomenta si tu tabla requiere fecha manual
+                }).execute()
+                print("✅ Usuario sincronizado correctamente.")
+                
+        except Exception as e_sync:
+            # Si falla este paso extra, NO bloqueamos el acceso. Solo lo registramos.
+            # Así aseguramos que la función principal (autenticar) siempre prevalezca.
+            print(f"⚠️ Aviso: La auto-sincronización encontró un detalle: {e_sync}")
+        # ==============================================================================
+
+        # 3. RETORNO ORIGINAL
+        return user_id
         
+    except HTTPException as he:
+        # Re-lanzamos las excepciones HTTP tal cual (para no perder los códigos 401)
+        raise he
     except Exception as e:
         print(f"⚠️ Error de Auth: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Sesión inválida. Por favor, inicia sesión nuevamente."
         )
-
+        
 # Función de verificación legacy (para webhooks públicos)
 async def verificar_llave(api_key: str = Depends(api_key_header)):
     if APP_PASSWORD and api_key != APP_PASSWORD:
@@ -536,11 +572,15 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         """
 
         # --- AQUÍ ESTÁ LA ACTIVACIÓN DE INTERNET ---
-        herramientas = [{"google_search": {}}]
+        herramienta_google = [
+            genai.protos.Tool(
+                google_search_retrieval=genai.protos.GoogleSearchRetrieval()
+            )
+        ]   
         
         model = genai.GenerativeModel(
             model_name=MODELO_IA,
-            tools=herramientas  # <--- Esto conecta a Google
+            tools=herramienta_google
         )
         
         response = model.generate_content(prompt)
