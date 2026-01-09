@@ -330,7 +330,10 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     Crea una alerta directa (Intención TAREA).
-    Versión Robusta: Corrige typos y asegura guardado aunque falle el JSON.
+    SOLUCIÓN ROBUSTA: 
+    1. Interpreta typos y fechas relativas.
+    2. Si falla el formato JSON, guarda en modo texto (Fallback).
+    3. Si falla la Base de Datos (ID incorrecto), avisa sin romper el sistema.
     """
     # 1. Obtenemos la fecha exacta en Lima, Perú
     zona_horaria = pytz.timezone('America/Lima')
@@ -352,61 +355,76 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     
     JSON Schema: 
     {{
-        "titulo": "...", 
-        "descripcion": "...",
+        "titulo": "Resumen muy breve (Ej: Cita Médica)", 
+        "descripcion": "Detalle completo con la FECHA CALCULADA explícita (Ej: Cita en Loayza el 12/01 a las 9am)",
         "prioridad": "ALTA" | "MEDIA" | "BAJA",
-        "etiqueta": "..."
+        "etiqueta": "NEGOCIO" | "ESTUDIO" | "SALUD" | "PERSONAL" | "OTROS"
     }}
     """
+    # Variable para almacenar los datos finales a guardar
+    datos_finales = {}
+
+    # --- PASO 1: INTENTO DE INTELIGENCIA ARTIFICIAL ---
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         
-        # --- CAPA DE SEGURIDAD 1: Limpieza de JSON ---
-        # A veces la IA pone ```json al inicio. Esto lo elimina para que no falle.
+        # Limpieza agresiva del texto (quita ```json, ``` y espacios)
         texto_limpio = resp.text.strip().replace("```json", "").replace("```", "")
         data = json.loads(texto_limpio)
         
-        # Insertamos con los datos estructurados por la IA
-        supabase.table('alertas').insert({
+        # Si llegamos aquí, la IA funcionó perfecto
+        datos_finales = {
             "usuario_id": usuario_id,
-            "titulo": data['titulo'],
+            "titulo": data.get('titulo', 'Tarea Nueva'),
             "descripcion": data.get('descripcion', mensaje),
-            "prioridad": data['prioridad'],
+            "prioridad": data.get('prioridad', 'MEDIA'),
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": data.get('etiqueta', 'OTROS')
-        }).execute()
-        
-        return {
-            "status": "tarea_creada", 
-            "respuesta": f"✅ Tarea: {data['titulo']} \n📂 {data.get('etiqueta','OTROS')} \n📝 {data.get('descripcion','')}"
         }
 
-    except Exception as e:
-        print(f"⚠️ Error procesando JSON de tarea: {e}")
+    except Exception as e_ia:
+        print(f"⚠️ La IA no pudo estructurar el JSON: {e_ia}. Usando modo manual.")
+        # --- PASO 2: FALLBACK (Plan B si la IA falla) ---
+        # Si la IA falla, no nos detenemos. Preparamos los datos "en crudo".
+        datos_finales = {
+            "usuario_id": usuario_id,
+            "titulo": "Recordatorio Rápido", # Título genérico
+            "descripcion": mensaje,          # Guardamos el texto original tal cual
+            "prioridad": "MEDIA",
+            "tipo": "manual",
+            "estado": "pendiente",
+            "etiqueta": "OTROS"
+        }
+
+    # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
+    try:
+        # Intentamos insertar los datos (ya sean de la IA o del Plan B)
+        supabase.table('alertas').insert(datos_finales).execute()
         
-        # --- CAPA DE SEGURIDAD 2: Fallback (Guardado de Emergencia) ---
-        # Si la IA falla entendiendo el formato, GUARDAMOS EL MENSAJE ORIGINAL.
-        # Así el usuario no pierde su recordatorio.
-        try:
-            supabase.table('alertas').insert({
-                "usuario_id": usuario_id,
-                "titulo": "Recordatorio (Texto original)",
-                "descripcion": mensaje, # Guardamos lo que escribió el usuario tal cual
-                "prioridad": "MEDIA",
-                "tipo": "manual",
-                "estado": "pendiente",
-                "etiqueta": "OTROS"
-            }).execute()
-            
-            return {
-                "status": "tarea_creada", 
-                "respuesta": "✅ Agendado. (Nota: No pude estructurar los detalles automáticamente, pero guardé tu mensaje tal cual)."
-            }
-        except Exception as e_bd:
-            return {"status": "error", "respuesta": "Error crítico conectando con la base de datos."}
-            
+        # ÉXITO TOTAL
+        origen = "🤖 IA" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
+        return {
+            "status": "tarea_creada", 
+            "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}"
+        }
+
+    except Exception as e_bd:
+        # --- PASO 4: MANEJO DE ERROR DE USUARIO (Si el ID no existe) ---
+        print(f"🛑 Error Base de Datos: {e_bd}")
+        
+        # Aquí capturamos el error de "Usuario no existe" para que no salga "Error Crítico"
+        return {
+            "status": "error_db", 
+            "respuesta": (
+                f"⚠️ Entendido: '{datos_finales['titulo']}'.\n\n"
+                "Sin embargo, no pude guardarlo en tu agenda porque tu usuario no está sincronizado correctamente con la base de datos.\n"
+                "👉 Por favor, cierra sesión y vuelve a ingresar para reactivar tu cuenta."
+            )
+        }
+
+        
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
     """
     Responde consultas conectando:
@@ -518,7 +536,7 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         """
 
         # --- AQUÍ ESTÁ LA ACTIVACIÓN DE INTERNET ---
-        herramientas = [{"google_search_retrieval": {}}]
+        herramientas = [{"google_search": {}}]
         
         model = genai.GenerativeModel(
             model_name=MODELO_IA,
