@@ -151,24 +151,26 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
     
     1. BASURA (Chat Efímero / General): 
        - Saludos ("Hola", "Buenas noches"), agradecimientos ("Gracias").
-       - Preguntas de cultura general o noticias ("¿Quién ganó el mundial?", "¿Qué es el estoicismo?").
+       - Preguntas de cultura general, noticias o dudas simples ("¿Qué hora es?", "¿Lloverá hoy?").
        - Conversación casual sin datos personales.
-       -> ACCIÓN SISTEMA: NO GUARDAR (Responder usando conocimiento general).
+       -> ACCIÓN SISTEMA: NO GUARDAR (Responder usando conocimiento general + Internet).
 
     2. TAREA (Acción o Evento Futuro):
-       - Órdenes directas ("Recuérdame pagar la luz").
+       - Órdenes directas ("Recuérdame pagar la luz", "Agendar cita").
        - Declaración de compromisos o citas ("Mañana tengo dentista a las 5", "El lunes viajo").
-       -> ACCIÓN SISTEMA: CREAR ALERTA/RECORDATORIO.
+       - CORRECCIONES de tareas anteriores ("No, era a las 4pm", "Cambia la fecha").
+       -> ACCIÓN SISTEMA: CREAR O MODIFICAR ALERTA.
 
-    3. VALOR (Memoria y Perfilado):
-       - El usuario cuenta algo de su vida, gustos, familia o trabajo ("Soy alérgico a las nueces", "Mi jefe se llama Carlos").
-       - Conversaciones profundas, archivos adjuntos o textos largos.
-       -> ACCIÓN SISTEMA: GUARDAR, RESUMIR Y ACTUALIZAR PERFIL.
+    3. VALOR (Memoria, Perfilado y ANÁLISIS DE ERRORES):
+       - El usuario cuenta algo de su vida, gustos, familia ("Soy alérgico a las nueces").
+       - RECLAMOS O CONSULTAS TÉCNICAS: "¿Por qué no pudiste agendar?", "¿Qué pasó con la tarea anterior?", "¿Qué sabes de mí?".
+       - Conversaciones profundas o archivos adjuntos.
+       -> ACCIÓN SISTEMA: GUARDAR Y ANALIZAR CONTEXTO.
 
     Responde SOLO el JSON:
     {{
         "tipo": "BASURA" | "VALOR" | "TAREA",
-        "subtipo": "chat_general | dato_personal | evento_pendiente",
+        "subtipo": "chat_general | dato_personal | evento_pendiente | reclamo_sistema",
         "urgencia": "ALTA | MEDIA | BAJA"
     }}
     """
@@ -177,8 +179,9 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except:
-        # Fallback de seguridad: Si es largo, asumimos que es VALOR para no perder info.
-        return {"tipo": "VALOR" if len(mensaje) > 20 else "BASURA"}
+        # Fallback de seguridad: Si el mensaje es largo o parece una queja, es VALOR.
+        es_queja = any(x in mensaje.lower() for x in ["por qué", "qué pasó", "error", "no pudiste"])
+        return {"tipo": "VALOR" if (len(mensaje) > 20 or es_queja) else "BASURA"}
 
 from datetime import datetime
 import json
@@ -327,9 +330,9 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     Crea una alerta directa (Intención TAREA).
+    Versión Robusta: Corrige typos y asegura guardado aunque falle el JSON.
     """
-    # 1. MODIFICACIÓN: Obtenemos la fecha exacta en Lima, Perú
-    # Esto garantiza que si es de noche, 'mañana' se calcule bien.
+    # 1. Obtenemos la fecha exacta en Lima, Perú
     zona_horaria = pytz.timezone('America/Lima')
     fecha_obj = datetime.now(zona_horaria)
     fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)") # Ej: 2026-01-05 (Lunes)
@@ -342,24 +345,29 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     
     INSTRUCCIONES CLAVE:
     1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
-    2. 'descripcion': DEBE contener todos los detalles clave encontrados: HORA exacta, LUGAR, NOMBRES y CONTEXTO. 
-       IMPORTANTE: Si el usuario dice fechas relativas (ej: "Mañana", "El viernes"), CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA en la descripción.
+    2. 'descripcion': DEBE contener todos los detalles clave: HORA exacta, LUGAR, NOMBRES.
+       IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
     3. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
+    4. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
     
     JSON Schema: 
     {{
-        'titulo': '...', 
-        'descripcion': '...',
-        'prioridad': 'ALTA' | 'MEDIA' | 'BAJA',
-        'etiqueta': '...'
+        "titulo": "...", 
+        "descripcion": "...",
+        "prioridad": "ALTA" | "MEDIA" | "BAJA",
+        "etiqueta": "..."
     }}
     """
     try:
         model = genai.GenerativeModel(MODELO_IA)
         resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        data = json.loads(resp.text)
         
-        # Insertamos con usuario_id real (Mantenemos tu código original de inserción)
+        # --- CAPA DE SEGURIDAD 1: Limpieza de JSON ---
+        # A veces la IA pone ```json al inicio. Esto lo elimina para que no falle.
+        texto_limpio = resp.text.strip().replace("```json", "").replace("```", "")
+        data = json.loads(texto_limpio)
+        
+        # Insertamos con los datos estructurados por la IA
         supabase.table('alertas').insert({
             "usuario_id": usuario_id,
             "titulo": data['titulo'],
@@ -374,16 +382,38 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "status": "tarea_creada", 
             "respuesta": f"✅ Tarea: {data['titulo']} \n📂 {data.get('etiqueta','OTROS')} \n📝 {data.get('descripcion','')}"
         }
-    except Exception as e:
-        print(f"Error tarea directa: {e}")
-        return {"status": "error", "respuesta": "No pude procesar la tarea."}
 
+    except Exception as e:
+        print(f"⚠️ Error procesando JSON de tarea: {e}")
+        
+        # --- CAPA DE SEGURIDAD 2: Fallback (Guardado de Emergencia) ---
+        # Si la IA falla entendiendo el formato, GUARDAMOS EL MENSAJE ORIGINAL.
+        # Así el usuario no pierde su recordatorio.
+        try:
+            supabase.table('alertas').insert({
+                "usuario_id": usuario_id,
+                "titulo": "Recordatorio (Texto original)",
+                "descripcion": mensaje, # Guardamos lo que escribió el usuario tal cual
+                "prioridad": "MEDIA",
+                "tipo": "manual",
+                "estado": "pendiente",
+                "etiqueta": "OTROS"
+            }).execute()
+            
+            return {
+                "status": "tarea_creada", 
+                "respuesta": "✅ Agendado. (Nota: No pude estructurar los detalles automáticamente, pero guardé tu mensaje tal cual)."
+            }
+        except Exception as e_bd:
+            return {"status": "error", "respuesta": "Error crítico conectando con la base de datos."}
+            
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
     """
     Responde consultas conectando:
     1. PERFIL (Memoria a Largo Plazo: Quién es el usuario).
     2. HISTORIAL (Memoria a Corto/Mediano Plazo: Qué ha pasado).
     3. TAREAS (Agenda: Qué tiene pendiente).
+    4. INTERNET (Google Search: Para datos actuales).
     """
     if not supabase: return "Error: No hay conexión a base de datos."
     
@@ -396,15 +426,13 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 
     try:
         # ==============================================================================
-        # 1. (NUEVO) RECUPERAR PERFIL DEL USUARIO
-        # Esto es lo que le da "personalidad" y memoria de largo plazo.
+        # 1. RECUPERAR PERFIL DEL USUARIO (Tu código original)
         # ==============================================================================
         res_perfil = supabase.table('perfil_usuario')\
             .select('dato')\
             .eq('usuario_id', usuario_id)\
             .execute()
         
-        # Formateamos la lista de conocimientos sobre el usuario
         if res_perfil.data:
             lista_perfil = [f"- {p['dato']}" for p in res_perfil.data]
             texto_perfil = "\n".join(lista_perfil)
@@ -416,8 +444,6 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         # ==============================================================================
         if modo_profundo:
             # --- MODO PROFUNDO ---
-            # print(f"🔍 Modo Profundo: Analizando historial extenso para {usuario_id}...")
-            
             res_conv = supabase.table('conversaciones')\
                 .select('resumen, tipo, created_at')\
                 .eq('usuario_id', usuario_id)\
@@ -465,7 +491,7 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
             contexto_bd = f"PENDIENTES AHORA:\n{pendientes_txt}\n\nCONTEXTO RECIENTE:\n{reciente_txt}"
 
         # ==============================================================================
-        # 3. CEREBRO DE LA RESPUESTA (Prompt Actualizado con Perfil)
+        # 3. CEREBRO DE LA RESPUESTA (MODIFICADO PARA INTERNET)
         # ==============================================================================
         prompt = f"""
         Actúa como un Asistente Personal de Inteligencia Artificial altamente eficiente y empático.
@@ -485,12 +511,20 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         CONSULTA DEL USUARIO: "{mensaje}"
         
         DIRECTRICES DE RESPUESTA:
-        1. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta. (Ej: Si sabes su profesión o familia, tenlo en cuenta).
-        2. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
-        3. TONO: Eres un asistente útil. No inventes tareas. Sé claro y directo.
+        1. INTERNET: Si el usuario pregunta por noticias, clima, dólar o datos actuales, USA TU HERRAMIENTA DE BÚSQUEDA (Google Search).
+        2. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta.
+        3. HISTORIAL: Si pregunta algo específico del pasado, usa el CONTEXTO.
+        4. TONO: Eres un asistente útil. Sé claro y directo.
         """
 
-        model = genai.GenerativeModel(MODELO_IA)
+        # --- AQUÍ ESTÁ LA ACTIVACIÓN DE INTERNET ---
+        herramientas = [{"google_search_retrieval": {}}]
+        
+        model = genai.GenerativeModel(
+            model_name=MODELO_IA,
+            tools=herramientas  # <--- Esto conecta a Google
+        )
+        
         response = model.generate_content(prompt)
         return response.text
 
