@@ -1,3 +1,4 @@
+
 # ====================================================
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
@@ -574,7 +575,7 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         # --- AQUÍ ESTÁ LA ACTIVACIÓN DE INTERNET ---
         herramienta_google = [
             genai.protos.Tool(
-                google_search_retrieval=genai.protos.GoogleSearchRetrieval()
+                google_search=genai.protos.GoogleSearch()
             )
         ]   
         
