@@ -9,8 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
 
-from google import genai
-from google.genai import types
+try:
+    # Intentamos importar el SDK moderno de Google
+    from google import genai
+    from google.genai import types
+    GEMINI_DISPONIBLE = True
+except ImportError:
+    GEMINI_DISPONIBLE = False
+    print("⚠️ La librería google-genai no se encontró. Gemini no funcionará.")
 
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
@@ -34,6 +40,10 @@ APP_PASSWORD = os.getenv('MI_APP_PASSWORD')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
+
+
+
+
 
 
 MODELO_IA = "gemini-2.5-flash" 
@@ -769,6 +779,7 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
 
 
 
