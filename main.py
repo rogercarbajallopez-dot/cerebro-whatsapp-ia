@@ -251,11 +251,6 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
         es_queja = any(x in mensaje.lower() for x in ["por qué", "qué pasó", "error", "no pudiste"])
         return {"tipo": "VALOR" if (len(mensaje) > 20 or es_queja) else "BASURA"}
 
-from datetime import datetime
-import json
-import google.generativeai as genai
-
-# Asumo que 'supabase', 'genai' y 'MODELO_IA' ya están inicializados globalmente
 
 async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_id: str, origen: str = "webhook") -> Dict:
     """
@@ -779,6 +774,7 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
 
 
 
