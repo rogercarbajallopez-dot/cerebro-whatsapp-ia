@@ -1,3 +1,4 @@
+
 # ====================================================
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
@@ -9,9 +10,21 @@ from fastapi.middleware.cors import CORSMiddleware
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
 
-from google import genai  # ✅ Librería nueva
-from google.genai import types  # ✅ Librería nueva
+# ✅ IMPORTACIÓN CORRECTA DE LA LIBRERÍA NUEVA
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_DISPONIBLE = True
+    print("✅ Librería google-genai importada correctamente")
+except ImportError as e:
+    print(f"❌ ERROR: No se pudo importar google-genai: {e}")
+    print("Ejecuta: pip install google-genai==0.3.2")
+    GEMINI_DISPONIBLE = False
+    # Definir tipos vacíos para evitar errores
+    genai = None
+    types = None
 
+    
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 import os
@@ -40,16 +53,18 @@ MODELO_IA = "gemini-2.5-flash"
 
 # ✅ CREAR CLIENTE GLOBAL (Librería nueva)
 gemini_client = None
-if API_KEY_GOOGLE:
+if GEMINI_DISPONIBLE and API_KEY_GOOGLE:
     try:
         gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
-        print("✅ Gemini Client: CONECTADO")
+        print("✅ Gemini Client inicializado correctamente")
     except Exception as e:
-        print(f"❌ Error Gemini: {e}")
+        print(f"❌ Error creando cliente Gemini: {e}")
+        gemini_client = None
 else:
-    print("❌ ALERTA: No se encontró la API KEY de Google.")
-
-
+    if not GEMINI_DISPONIBLE:
+        print("⚠️ Librería google-genai no disponible")
+    if not API_KEY_GOOGLE:
+        print("⚠️ GOOGLE_API_KEY no configurada")
 
 # Conexión Supabase
 supabase: Client = None
