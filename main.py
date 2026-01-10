@@ -1,4 +1,3 @@
-
 # ====================================================
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
@@ -7,8 +6,12 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, B
 from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
-from google.generativeai.types import content_types
+#import google.generativeai as genai
+#from google.generativeai.types import content_types
+
+from google import genai  # ✅ Librería nueva
+from google.genai import types  # ✅ Librería nueva
+
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 import os
@@ -32,13 +35,21 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
-# Configuración IA
-if API_KEY_GOOGLE: 
-    genai.configure(api_key=API_KEY_GOOGLE)
+
+MODELO_IA = "gemini-2.5-flash" 
+
+# ✅ CREAR CLIENTE GLOBAL (Librería nueva)
+gemini_client = None
+if API_KEY_GOOGLE:
+    try:
+        gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
+        print("✅ Gemini Client: CONECTADO")
+    except Exception as e:
+        print(f"❌ Error Gemini: {e}")
 else:
     print("❌ ALERTA: No se encontró la API KEY de Google.")
 
-MODELO_IA = "gemini-2.5-flash" 
+
 
 # Conexión Supabase
 supabase: Client = None
@@ -212,8 +223,16 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
     }}
     """
     try:
-        model = genai.GenerativeModel(MODELO_IA)
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        if not gemini_client:
+            return {"tipo": "BASURA"}
+            
+        response = gemini_client.models.generate_content(
+            model=MODELO_IA,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         return json.loads(response.text)
     except:
         # Fallback de seguridad: Si el mensaje es largo o parece una queja, es VALOR.
@@ -277,9 +296,16 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
     """
 
     try:
-        # 3. Inferencia con Gemini
-        model = genai.GenerativeModel(MODELO_IA)
-        resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        if not gemini_client:
+            raise Exception("Cliente no disponible")
+        
+        response = gemini_client.models.generate_content(
+            model=MODELO_IA,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         analisis = json.loads(resp.text)
         
         # 4. GUARDAR CONVERSACIÓN (Historial)
@@ -402,10 +428,19 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     datos_finales = {}
 
     # --- PASO 1: INTENTO DE INTELIGENCIA ARTIFICIAL ---
+    
     try:
-        model = genai.GenerativeModel(MODELO_IA)
-        resp = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        
+        if not gemini_client:
+            raise Exception("Cliente Gemini no disponible")
+            
+        resp = gemini_client.models.generate_content(
+            model=MODELO_IA,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+
         # Limpieza agresiva del texto (quita ```json, ``` y espacios)
         texto_limpio = resp.text.strip().replace("```json", "").replace("```", "")
         data = json.loads(texto_limpio)
@@ -470,7 +505,7 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
     3. TAREAS (Agenda: Qué tiene pendiente).
     4. INTERNET (Google Search: Para datos actuales).
     """
-    if not supabase: return "Error: No hay conexión a base de datos."
+    if not supabase: return "Error: No hay conexión a base de datos o IA."
     
     # Garantizamos la hora Perú para que el contexto temporal sea exacto
     zona_horaria = pytz.timezone('America/Lima')
@@ -570,21 +605,24 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         2. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta.
         3. HISTORIAL: Si pregunta algo específico del pasado, usa el CONTEXTO.
         4. TONO: Eres un asistente útil. Sé claro y directo.
+        5. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
         """
 
-        # --- AQUÍ ESTÁ LA ACTIVACIÓN DE INTERNET ---
-        herramienta_google = [
-            genai.protos.Tool(
-                google_search=genai.protos.GoogleSearch()
-            )
-        ]   
-        
-        model = genai.GenerativeModel(
-            model_name=MODELO_IA,
-            tools=herramienta_google
+        # 4. CONFIGURACIÓN CON GOOGLE SEARCH ✅
+        # ==============================================================================
+        herramienta_google = types.Tool(
+            google_search=types.GoogleSearch()
         )
         
-        response = model.generate_content(prompt)
+        response = gemini_client.models.generate_content(
+            model=MODELO_IA,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[herramienta_google]
+            )
+        )
+        
+             
         return response.text
 
     except Exception as e:
