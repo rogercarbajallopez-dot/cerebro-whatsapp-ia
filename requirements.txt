@@ -1,7 +1,8 @@
 fastapi==0.109.0
 uvicorn==0.27.0
 python-multipart==0.0.9
-google-generativeai>=0.3.0
+google-genai==0.3.2
+#google-generativeai>=0.3.0
 spacy==3.7.2
 sentence-transformers==2.3.1
 scikit-learn==1.4.0
@@ -18,6 +19,7 @@ pytz
 # Truco experto: Esto instala el modelo de lenguaje directamente sin comandos extra
 
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
+
 
 
 
