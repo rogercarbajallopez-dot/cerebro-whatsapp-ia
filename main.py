@@ -1,4 +1,3 @@
-
 # ====================================================
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
@@ -10,21 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
 
-# ✅ IMPORTACIÓN CORRECTA DE LA LIBRERÍA NUEVA
-try:
-    from google import genai
-    from google.genai import types
-    GEMINI_DISPONIBLE = True
-    print("✅ Librería google-genai importada correctamente")
-except ImportError as e:
-    print(f"❌ ERROR: No se pudo importar google-genai: {e}")
-    print("Ejecuta: pip install google-genai==0.3.2")
-    GEMINI_DISPONIBLE = False
-    # Definir tipos vacíos para evitar errores
-    genai = None
-    types = None
+from google import genai
+from google.genai import types
 
-    
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 import os
