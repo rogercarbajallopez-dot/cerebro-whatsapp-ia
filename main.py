@@ -33,10 +33,6 @@ import jwt  # Se mantiene por compatibilidad con el archivo original
 from datetime import datetime, timedelta
 import pytz
 
-import firebase_admin
-from firebase_admin import credentials, messaging
-
-
 
 # 1. CARGA DE SECRETOS
 load_dotenv()
@@ -47,34 +43,49 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
 MODELO_IA = "gemini-2.5-flash" 
+import firebase_admin
+from firebase_admin import credentials, messaging
 
-# --- CONFIGURACIÓN FIREBASE INTELIGENTE ---
+# --- INICIO CONFIGURACIÓN FIREBASE (AGREGAR AQUÍ) ---
 if not firebase_admin._apps:
-    # 1. Intentar ruta de Render (Secret Files)
+    # 1. Rutas posibles de la llave (Render vs Local)
     ruta_render = "/etc/secrets/serviceAccountKey.json"
-    # 2. Intentar ruta local (en tu PC)
-    ruta_local = "serviceAccountKey.json"
-
-    credencial_usar = None
-
+    ruta_local = "serviceAccountKey.json" # Asegúrate que este nombre coincida con tu archivo
+    
+    credencial_final = None
+    
     if os.path.exists(ruta_render):
-        print("✅ Usando credenciales de RENDER")
-        credencial_usar = ruta_render
+        print("🔒 Usando credenciales seguras de RENDER")
+        credencial_final = ruta_render
     elif os.path.exists(ruta_local):
-        print("✅ Usando credenciales LOCALES")
-        credencial_usar = ruta_local
-    else:
-        print("⚠️ NO SE ENCONTRÓ la llave de Firebase. Las notificaciones no funcionarán.")
-
-    if credencial_usar:
+        print("💻 Usando credenciales LOCALES")
+        credencial_final = ruta_local
+    
+    if credencial_final:
         try:
-            cred = credentials.Certificate(credencial_usar)
+            cred = credentials.Certificate(credencial_final)
             firebase_admin.initialize_app(cred)
-            print("🚀 Firebase Inicializado Correctamente")
+            print("✅ Firebase conectado exitosamente")
         except Exception as e:
-            print(f"❌ Error al cargar Firebase: {e}")
+            print(f"❌ Error crítico conectando Firebase: {e}")
+    else:
+        print("⚠️ ALERTA: No se encontró serviceAccountKey.json. Sin notificaciones.")
 
-
+# Función auxiliar para enviar (Ponerla aquí para que esté disponible globalmente)
+def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
+    if not token or not firebase_admin._apps:
+        return
+    try:
+        msg = messaging.Message(
+            notification=messaging.Notification(title=titulo, body=cuerpo),
+            data=data_extra or {},
+            token=token
+        )
+        messaging.send(msg)
+        print(f"🚀 Notificación enviada a: {token[:10]}...")
+    except Exception as e:
+        print(f"❌ Error enviando push: {e}")
+# --- FIN CONFIGURACIÓN FIREBASE ---
 
 # ✅ CREAR CLIENTE GLOBAL (Librería nueva)
 gemini_client = None
@@ -407,8 +418,41 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
                 })
             
             if alertas:
-                supabase.table('alertas').insert(alertas).execute()
+                # Guardamos en BD y capturamos la respuesta 'res_alertas' para tener los IDs
+                res_alertas = supabase.table('alertas').insert(alertas).execute()
                 alertas_creadas = len(alertas)
+
+                # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
+                try:
+                    # 1. Obtener Token del usuario
+                    user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+                    
+                    if user_data.data and user_data.data[0].get('fcm_token'):
+                        token = user_data.data[0]['fcm_token']
+                        
+                        # 2. Recorrer las alertas creadas para notificar
+                        # (Si son muchas, podrías limitar a enviar solo la primera)
+                        for i, item in enumerate(alertas):
+                            # Determinar emoji
+                            prio = item.get('prioridad', 'MEDIA')
+                            emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
+                            
+                            # ID real de la base de datos (si está disponible)
+                            alerta_id = str(res_alertas.data[i]['id']) if res_alertas.data else "0"
+
+                            enviar_push(
+                                token=token,
+                                titulo=f"{emoji} Nueva Tarea: {item['titulo']}",
+                                cuerpo=item['descripcion'],
+                                data_extra={
+                                    "tipo": "TAREA",
+                                    "alerta_id": alerta_id,
+                                    "click_action": "FLUTTER_NOTIFICATION_CLICK"
+                                }
+                            )
+                except Exception as e_push:
+                    print(f"⚠️ Error enviando notificación masiva: {e_push}")
+                # 🔥🔥 FIN NOTIFICACIONES 🔥🔥
 
         # 7. Retorno final
         feedback_extra = f"\n🧠 Aprendí {memoria_guardada} cosas nuevas." if memoria_guardada > 0 else ""
@@ -507,8 +551,35 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
     # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
     try:
-        # Intentamos insertar los datos (ya sean de la IA o del Plan B)
-        supabase.table('alertas').insert(datos_finales).execute()
+        # Intentamos insertar los datos
+        res = supabase.table('alertas').insert(datos_finales).execute()
+        
+        # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
+        try:
+            # 1. Obtener Token
+            user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            
+            if user_data.data and user_data.data[0].get('fcm_token'):
+                token = user_data.data[0]['fcm_token']
+                
+                # 2. Configurar Emoji
+                prio = datos_finales.get('prioridad', 'MEDIA')
+                emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
+                
+                # 3. Enviar
+                enviar_push(
+                    token=token,
+                    titulo=f"{emoji} Tarea Creada: {datos_finales['titulo']}",
+                    cuerpo=datos_finales['descripcion'],
+                    data_extra={
+                        "tipo": "TAREA_MANUAL",
+                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
+                        "click_action": "FLUTTER_NOTIFICATION_CLICK"
+                    }
+                )
+        except Exception as e_push:
+            print(f"⚠️ Error enviando notificación manual: {e_push}")
+        # 🔥🔥 FIN NOTIFICACIONES 🔥🔥
         
         # ÉXITO TOTAL
         origen = "🤖 IA" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
@@ -802,6 +873,7 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
 
 
 
