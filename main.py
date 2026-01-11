@@ -33,6 +33,11 @@ import jwt  # Se mantiene por compatibilidad con el archivo original
 from datetime import datetime, timedelta
 import pytz
 
+import firebase_admin
+from firebase_admin import credentials, messaging
+
+
+
 # 1. CARGA DE SECRETOS
 load_dotenv()
 API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY')
@@ -41,12 +46,35 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
-
-
-
-
-
 MODELO_IA = "gemini-2.5-flash" 
+
+# --- CONFIGURACIÓN FIREBASE INTELIGENTE ---
+if not firebase_admin._apps:
+    # 1. Intentar ruta de Render (Secret Files)
+    ruta_render = "/etc/secrets/serviceAccountKey.json"
+    # 2. Intentar ruta local (en tu PC)
+    ruta_local = "serviceAccountKey.json"
+
+    credencial_usar = None
+
+    if os.path.exists(ruta_render):
+        print("✅ Usando credenciales de RENDER")
+        credencial_usar = ruta_render
+    elif os.path.exists(ruta_local):
+        print("✅ Usando credenciales LOCALES")
+        credencial_usar = ruta_local
+    else:
+        print("⚠️ NO SE ENCONTRÓ la llave de Firebase. Las notificaciones no funcionarán.")
+
+    if credencial_usar:
+        try:
+            cred = credentials.Certificate(credencial_usar)
+            firebase_admin.initialize_app(cred)
+            print("🚀 Firebase Inicializado Correctamente")
+        except Exception as e:
+            print(f"❌ Error al cargar Firebase: {e}")
+
+
 
 # ✅ CREAR CLIENTE GLOBAL (Librería nueva)
 gemini_client = None
@@ -774,8 +802,6 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
-
-
 
 
 
