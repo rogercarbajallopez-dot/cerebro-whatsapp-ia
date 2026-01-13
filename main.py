@@ -88,6 +88,26 @@ def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
         print(f"❌ Error enviando push: {e}")
 # --- FIN CONFIGURACIÓN FIREBASE ---
 
+# ==========================================
+# 🔔 NUEVA FUNCIÓN: Busca el token por ti
+# ==========================================
+def enviar_notificacion_inteligente(usuario_id: str, titulo: str, cuerpo: str):
+    # Esta función es para cuando NO tienes el token a mano (ej. desde el Webhook)
+    if not firebase_admin._apps: return
+    try:
+        # Buscamos el token en la base de datos
+        response = supabase.table("usuarios").select("fcm_token").eq("id", usuario_id).execute()
+        if not response.data or not response.data[0].get("fcm_token"):
+            return # No tiene celular vinculado
+            
+        token_detectado = response.data[0]["fcm_token"]
+        
+        # Reutilizamos tu función original para hacer el envío
+        enviar_push(token_detectado, titulo, cuerpo) 
+        
+    except Exception as e:
+        print(f"Error en envío inteligente: {e}")
+
 # ✅ CREAR CLIENTE GLOBAL (Librería nueva)
 gemini_client = None
 if GEMINI_DISPONIBLE and API_KEY_GOOGLE:
@@ -257,7 +277,7 @@ async def generar_briefing(tipo: str):
                 .select('*')\
                 .eq('usuario_id', user_id)\
                 .eq('estado', 'pendiente')\
-                .lte('fecha', filtro_fecha if tipo == 'matutino' else filtro_fecha)\
+                .lte('fecha_limite', filtro_fecha if tipo == 'matutino' else filtro_fecha)\
                 .execute() # 'lte' es "menor o igual" para atrapar atrasados en la mañana
             
             tareas = res_tareas.data
@@ -797,6 +817,18 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
             
             contexto_bd = f"PENDIENTES AHORA:\n{pendientes_txt}\n\nCONTEXTO RECIENTE:\n{reciente_txt}"
 
+        # 🔥 NUEVO: AGREGAR ESTO - BUSCADOR DE MEMORIA INTELIGENTE
+        # Buscamos en la base de datos recuerdos que se parezcan al tema que habla el usuario
+        memoria_vectorial = ""
+        try:
+            print(f"🧠 Buscando recuerdos semánticos para: {mensaje}")
+            memoria_vectorial = await buscar_contexto_historico(usuario_id, mensaje)
+        except Exception as e:
+            print(f"⚠️ Error buscando vectores: {e}")
+            memoria_vectorial = "(No se pudo acceder a la memoria profunda)"
+        
+        # 👆👆👆 FIN DE LO NUEVO PARTE 1 👆👆👆
+
         # ==============================================================================
         # 3. CEREBRO DE LA RESPUESTA (MODIFICADO PARA INTERNET)
         # ==============================================================================
@@ -815,14 +847,20 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         {contexto_bd}
         ---------------------------------------
         
+        🔥 MEMORIA PROFUNDA (RECUERDOS SIMILARES DEL PASADO):
+        ---------------------------------------
+        {memoria_vectorial}
+        ---------------------------------------
+
         CONSULTA DEL USUARIO: "{mensaje}"
         
         DIRECTRICES DE RESPUESTA:
         1. INTERNET: Si el usuario pregunta por noticias, clima, dólar o datos actuales, USA TU HERRAMIENTA DE BÚSQUEDA (Google Search).
         2. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta.
         3. HISTORIAL: Si pregunta algo específico del pasado, usa el CONTEXTO.
-        4. TONO: Eres un asistente útil. Sé claro y directo.
-        5. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
+        4. MEMORIA: Si pregunta "¿Qué me dijo Juan?", busca en MEMORIA PROFUNDA. Si pregunta "¿Qué hice hoy?", busca en MEMORIA RECIENTE.
+        5. TONO: Eres un asistente útil. Sé claro y directo.
+        6. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
         """
 
         # 4. CONFIGURACIÓN CON GOOGLE SEARCH ✅
@@ -846,6 +884,57 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         print(f"Error en consulta rápida: {e}")
         return "Lo siento, tuve un problema conectando con tu memoria."
 
+
+# ==============================================================================
+# 🧠 CEREBRO IA: MEMORIA Y VECTORES
+# ==============================================================================
+
+async def generar_embedding(texto: str):
+    """Convierte texto en una lista de números (vector) usando Gemini"""
+    if not GEMINI_DISPONIBLE: return None
+    try:
+        # Usamos el modelo optimizado para embeddings
+        result = await client_gemini.embed_content(
+            model="models/text-embedding-004",
+            content=texto
+        )
+        return result['embedding']
+    except Exception as e:
+        print(f"⚠️ Error generando embedding: {e}")
+        return None
+
+async def buscar_contexto_historico(usuario_id: str, consulta: str):
+    """Busca conversaciones pasadas similares a la consulta actual"""
+    vector_consulta = await generar_embedding(consulta)
+    if not vector_consulta: return ""
+
+    try:
+        # Llamamos a la función RPC 'match_conversaciones' que creaste en SQL
+        res = supabase.rpc(
+            'match_conversaciones', 
+            {
+                'query_embedding': vector_consulta,
+                'match_threshold': 0.6, # 60% de similitud mínima
+                'match_count': 3,       # Traer los 3 recuerdos más relevantes
+                'p_usuario_id': usuario_id
+            }
+        ).execute()
+        
+        if not res.data: return ""
+
+        contexto = "\n🔍 MEMORIA HISTÓRICA:\n"
+        for item in res.data:
+            # Asumiendo que tu tabla conversaciones tiene columna 'resumen'
+            resumen = item.get('resumen', 'Sin resumen')
+            contexto += f"- {resumen}\n"
+            
+        return contexto
+    except Exception as e:
+        print(f"❌ Error buscando memoria: {e}")
+        return ""
+
+
+# ==============================================================================
 # ======================================================================
 # 🚀 ENDPOINTS API (ACTUALIZADOS CON AUTH)
 # ======================================================================
@@ -976,6 +1065,17 @@ async def webhook_whatsapp(request: Request):
     
     if tipo == "VALOR":
         await procesar_informacion_valor(mensaje, decision, usuario_id_webhook, "whatsapp_webhook")
+        # --- INICIO DEL AGREGADO ---
+        # Solo notificamos si la IA detectó que es urgente
+        urgencia = decision.get("urgencia", "MEDIA")
+        
+        if urgencia in ["ALTA", "CRITICA", "URGENTE"]:
+            enviar_notificacion_inteligente(
+                usuario_id_webhook, 
+                "🚨 Atención Requerida", 
+                decision.get('resumen', 'Nueva alerta importante')
+            )
+        # --- FIN DEL AGREGADO ---
     elif tipo == "TAREA":
         await crear_tarea_directa(mensaje, usuario_id_webhook)
 
