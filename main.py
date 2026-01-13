@@ -894,7 +894,7 @@ async def generar_embedding(texto: str):
     if not GEMINI_DISPONIBLE: return None
     try:
         # Usamos el modelo optimizado para embeddings
-        result = await client_gemini.embed_content(
+        result = await gemini_client.embed_content(
             model="models/text-embedding-004",
             content=texto
         )
