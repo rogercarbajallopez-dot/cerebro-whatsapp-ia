@@ -1,7 +1,8 @@
 # ====================================================
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
 # ====================================================
-
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
 from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
@@ -213,11 +214,120 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
     if nombre.endswith('.opus'): return 'audio/ogg'
     return mimetypes.guess_type(nombre)[0] or mime
 
+# ==============================================================================
+# ⏰ CRON JOB: ESTRATEGIA "EXECUTIVE ASSISTANT" (6 AM / 6 PM)
+# ==============================================================================
+scheduler = AsyncIOScheduler()
+
+async def generar_briefing(tipo: str):
+    """
+    tipo="matutino": Prioridad a lo de HOY (Urgente).
+    tipo="nocturno": Prioridad a lo de MAÑANA (Planificación).
+    """
+    print(f"⏰ Ejecutando Briefing {tipo}...")
+    
+    # 1. Definir Fechas (Zona Horaria Perú)
+    zona_peru = pytz.timezone('America/Lima')
+    hoy = datetime.now(zona_peru)
+    
+    if tipo == "matutino":
+        # Filtro: Tareas pendientes para HOY o atrasadas
+        filtro_fecha = hoy.strftime("%Y-%m-%d")
+        mensaje_intro = "☀️ *Buenos días. Tu Plan de Hoy:*"
+    else:
+        # Filtro: Tareas para MAÑANA
+        manana = hoy + timedelta(days=1)
+        filtro_fecha = manana.strftime("%Y-%m-%d")
+        mensaje_intro = "🌙 *Cierre del día. Para mañana tienes:*"
+
+    # 2. Consultar Usuarios (Asumiendo que tienes una tabla de usuarios con FCM Token)
+    # NOTA: Necesitas guardar el token FCM en tu BD para saber a quién enviar.
+    try:
+        usuarios = supabase.table('usuarios').select('id, fcm_token').execute()
+        
+        for usuario in usuarios.data:
+            user_id = usuario['id']
+            token = usuario.get('fcm_token')
+            
+            if not token: continue # Si no tiene token, saltamos
+
+            # 3. CONSULTA INTELIGENTE (Matriz Eisenhower en SQL)
+            # Traemos tareas pendientes de la fecha objetivo
+            res_tareas = supabase.table('alertas')\
+                .select('*')\
+                .eq('usuario_id', user_id)\
+                .eq('estado', 'pendiente')\
+                .lte('fecha', filtro_fecha if tipo == 'matutino' else filtro_fecha)\
+                .execute() # 'lte' es "menor o igual" para atrapar atrasados en la mañana
+            
+            tareas = res_tareas.data
+            
+            if not tareas:
+                if tipo == "matutino":
+                    cuerpo = "¡No tienes pendientes urgentes! Disfruta tu café. ☕"
+                    enviar_push(token, "Resumen Diario", cuerpo)
+                continue
+
+            # 4. ALGORITMO DE PRIORIZACIÓN (Python)
+            # Ordenamos: 
+            #  1ro: Etiquetas Críticas (SALUD, NEGOCIO)
+            #  2do: Prioridad (ALTA > MEDIA)
+            def puntaje_importancia(t):
+                score = 0
+                etiqueta = (t.get('etiqueta') or '').upper()
+                prioridad = (t.get('prioridad') or '').upper()
+                
+                # Matriz de Importancia
+                if etiqueta in ['SALUD', 'NEGOCIO', 'FAMILIA']: score += 10
+                elif etiqueta in ['ESTUDIO']: score += 5
+                
+                # Matriz de Urgencia
+                if prioridad == 'ALTA': score += 5
+                elif prioridad == 'MEDIA': score += 2
+                
+                return score
+
+            # Ordenamos la lista de mayor a menor importancia
+            tareas_ordenadas = sorted(tareas, key=puntaje_importancia, reverse=True)
+            
+            # 5. Generar el Mensaje (Top 3-5 tareas)
+            top_tareas = tareas_ordenadas[:5]
+            cuerpo = mensaje_intro + "\n"
+            
+            for t in top_tareas:
+                icono = "🔴" if t.get('prioridad') == 'ALTA' else "⚪"
+                cuerpo += f"{icono} {t['titulo']} ({t.get('etiqueta', 'General')})\n"
+            
+            if len(tareas) > 5:
+                cuerpo += f"... y {len(tareas)-5} más."
+
+            # 6. ENVIAR NOTIFICACIÓN
+            # 'ir_a': 'hoy' o 'manana' sirve para que Flutter abra la pestaña correcta
+            enviar_push(
+                token, 
+                "Asistente IA", 
+                cuerpo, 
+                data_extra={"ir_a": "hoy" if tipo == "matutino" else "manana"}
+            )
+            
+    except Exception as e:
+        print(f"❌ Error en Cron Job: {e}")
+
 # --- LIFESPAN (INICIO) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global nlp
     print("🚀 Iniciando Sistema v19.0 (Con Auth Completa)...")
+    
+    # --- INICIO SCHEDULER ---
+    # 6:00 AM - Morning Briefing
+    scheduler.add_job(generar_briefing, CronTrigger(hour=6, minute=0, timezone='America/Lima'), args=["matutino"])
+    # 6:00 PM - Evening Planning
+    scheduler.add_job(generar_briefing, CronTrigger(hour=18, minute=0, timezone='America/Lima'), args=["nocturno"])
+    
+    scheduler.start()
+    # --- FIN SCHEDULER ---
+    
     try:
         nlp = spacy.load("es_core_news_sm")
     except:
@@ -228,6 +338,7 @@ async def lifespan(app: FastAPI):
     print("✅ NLP Listo")
     yield
     print("👋 Apagando sistema")
+    scheduler.shutdown() # No olvides apagarlo al salir
 
 app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
@@ -873,7 +984,6 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
-
 
 
 
