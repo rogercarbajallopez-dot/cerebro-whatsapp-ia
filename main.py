@@ -7,6 +7,7 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, B
 from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
 
@@ -33,6 +34,7 @@ from pydantic import BaseModel
 import jwt  # Se mantiene por compatibilidad con el archivo original
 from datetime import datetime, timedelta
 import pytz
+from contexto_extractor import ExtractorContexto, enriquecer_alerta_con_contexto
 
 
 # 1. CARGA DE SECRETOS
@@ -537,6 +539,12 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
         if tareas_detectadas:
             alertas = []
             for t in tareas_detectadas:
+                # 🔥 NUEVO: Enriquecer cada tarea
+                contexto_tarea = enriquecer_alerta_con_contexto(
+                    titulo=t.get('titulo', 'Recordatorio'),
+                    descripcion=t.get('descripcion', analisis['resumen_guardar'])
+                )
+
                 alertas.append({
                     "usuario_id": usuario_id,
                     "conversacion_id": conv_id,
@@ -545,7 +553,8 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
                     "prioridad": t.get('prioridad', 'MEDIA'),
                     "tipo": "auto_detectada",
                     "estado": "pendiente",
-                    "etiqueta": t.get('etiqueta', 'OTROS')
+                    "etiqueta": t.get('etiqueta', 'OTROS'),
+                    "metadata": contexto_tarea  # 🔥 AGREGAR ESTO
                 })
             
             if alertas:
@@ -602,7 +611,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
 
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
-    Crea una alerta directa (Intención TAREA).
+    Crea una alerta directa CON ENRIQUECIMIENTO CONTEXTUAL.(Intención TAREA).
     SOLUCIÓN ROBUSTA: 
     1. Interpreta typos y fechas relativas.
     2. Si falla el formato JSON, guarda en modo texto (Fallback).
@@ -625,13 +634,16 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
        IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
     3. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
     4. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
-    
+    5. 'prioridad': ALTA (crítico/urgente) | MEDIA (importante) | BAJA (puede esperar)
+    6. 'fecha_limite': Si hay fecha/hora, en formato ISO "2026-01-15T17:00:00"
+
     JSON Schema: 
     {{
         "titulo": "Resumen muy breve (Ej: Cita Médica)", 
         "descripcion": "Detalle completo con la FECHA CALCULADA explícita (Ej: Cita en Loayza el 12/01 a las 9am)",
         "prioridad": "ALTA" | "MEDIA" | "BAJA",
         "etiqueta": "NEGOCIO" | "ESTUDIO" | "SALUD" | "PERSONAL" | "OTROS"
+        "fecha_limite": "2026-01-15T17:00:00" o null
     }}
     """
     # Variable para almacenar los datos finales a guardar
@@ -663,7 +675,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "prioridad": data.get('prioridad', 'MEDIA'),
             "tipo": "manual",
             "estado": "pendiente",
-            "etiqueta": data.get('etiqueta', 'OTROS')
+            "etiqueta": data.get('etiqueta', 'OTROS'),
+            "fecha_limite": data.get('fecha_limite'),
+            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
     except Exception as e_ia:
@@ -677,7 +691,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "prioridad": "MEDIA",
             "tipo": "manual",
             "estado": "pendiente",
-            "etiqueta": "OTROS"
+            "etiqueta": "OTROS",
+            "fecha_limite": data.get('fecha_limite'),
+            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
     # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
@@ -705,6 +721,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                     data_extra={
                         "tipo": "TAREA_MANUAL",
                         "alerta_id": str(res.data[0]['id']) if res.data else "0",
+                        "acciones": contexto.get('acciones_sugeridas', []),
                         "click_action": "FLUTTER_NOTIFICATION_CLICK"
                     }
                 )
@@ -713,10 +730,15 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         # 🔥🔥 FIN NOTIFICACIONES 🔥🔥
         
         # ÉXITO TOTAL
-        origen = "🤖 IA" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
+        origen = "🤖 IA+Contexto" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
+        acciones_info = ""
+        if contexto.get('acciones_sugeridas'):
+            acciones_info = f"\n🔘 Acciones disponibles: {', '.join(contexto['acciones_sugeridas'])}"
+        
         return {
             "status": "tarea_creada", 
-            "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}"
+            "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
+            "metadata": contexto  # Devolver para que Flutter lo use
         }
 
     except Exception as e_bd:
@@ -1030,6 +1052,33 @@ async def obtener_alertas(
     
     return {"alertas": q.execute().data}
 
+@app.get("/api/alertas/prioritarias")
+async def obtener_alertas_prioritarias(
+    limite: int = 20,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Obtiene alertas ordenadas por score de urgencia.
+    Usa la vista SQL creada anteriormente.
+    """
+    if not supabase:
+        return {"alertas": []}
+    
+    try:
+        # Usar la vista SQL que ordena por score
+        resultado = supabase.from_('alertas_prioritarias')\
+            .select('*')\
+            .eq('usuario_id', usuario_id)\
+            .limit(limite)\
+            .execute()
+        
+        return {"alertas": resultado.data, "total": len(resultado.data)}
+    
+    except Exception as e:
+        print(f"Error obteniendo prioritarias: {e}")
+        # Fallback: Query normal
+        return {"alertas": [], "error": str(e)}
+
 @app.patch("/api/alertas/{alerta_id}")
 async def actualizar_alerta(
     alerta_id: str, 
@@ -1100,4 +1149,3 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
-
