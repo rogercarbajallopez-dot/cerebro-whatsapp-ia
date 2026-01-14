@@ -893,12 +893,28 @@ async def generar_embedding(texto: str):
     """Convierte texto en una lista de números (vector) usando Gemini"""
     if not GEMINI_DISPONIBLE: return None
     try:
-        # Usamos el modelo optimizado para embeddings
-        result = await gemini_client.embed_content(
-            model="models/text-embedding-004",
-            content=texto
+        # 2. Usamos TU variable global exacta
+        global gemini_client 
+        
+        # Si por alguna razón está vacía, intentamos reconectar
+        if gemini_client is None and API_KEY_GOOGLE:
+             gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
+
+        if not gemini_client:
+            print("⚠️ No hay cliente Gemini disponible para embeddings")
+            return []
+
+        # 3. 🔥 LA CORRECCIÓN CLAVE: Usamos .models.embed_content
+        # Tu versión de librería requiere entrar a 'models' primero
+        result = gemini_client.models.embed_content(
+            model="text-embedding-004",
+            contents=texto
         )
-        return result['embedding']
+        
+        # 4. Extraemos y devolvemos la lista de números
+        if result.embeddings:
+            return result.embeddings[0].values
+        return []
     except Exception as e:
         print(f"⚠️ Error generando embedding: {e}")
         return None
@@ -1084,4 +1100,4 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
-        
+
