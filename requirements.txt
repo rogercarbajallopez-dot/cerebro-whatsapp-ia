@@ -27,6 +27,11 @@ apscheduler
 httpx>=0.28.1
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
 
+# 🆕 NUEVAS - PROCESAMIENTO AVANZADO
+python-dateutil==2.8.2     # Parser de fechas inteligente
+phonenumbers==8.13.27      # Validación de números telefónicos
+geopy==2.4.1               # Geocodificación de direcciones
+langdetect==1.0.9          # Detección de idioma
 
 
 
