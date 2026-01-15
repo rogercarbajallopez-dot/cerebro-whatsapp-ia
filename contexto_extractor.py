@@ -30,6 +30,8 @@ class ExtractorContexto:
         
         # Palabras clave para tipo de acción
         self.keywords_accion = {
+            # 🔥 NUEVO: Prioridad a Alarmas
+            'alarma': ['despiértame', 'alarma', 'despertador', 'despertar', 'avísame a las', 'pon una alarma'],
             'reunion_presencial': ['reunión', 'cita', 'junta', 'encuentro', 'visita', 'ir a'],
             'videollamada': ['zoom', 'meet', 'teams', 'videollamada', 'video llamada', 'google meet'],
             'llamada': ['llamar', 'telefonear', 'contactar por teléfono'],
@@ -236,7 +238,7 @@ class ExtractorContexto:
         Detecta el tipo de acción basándose en palabras clave.
         
         Returns:
-            'reunion_presencial' | 'videollamada' | 'llamada' | 'whatsapp' | 'email' | 'pago' | 'tarea_general'
+           'alarma' | 'reunion_presencial' | 'videollamada' | 'llamada' | 'whatsapp' | 'email' | 'pago' | 'tarea_general'
         """
         texto_lower = texto.lower()
         
@@ -303,12 +305,16 @@ class ExtractorContexto:
         Basándose en el contexto extraído, sugiere qué botones mostrar.
         
         Returns:
-            ['agendar_calendario', 'ver_ubicacion', 'llamar', 'whatsapp', 'email']
+            ['alarma', 'agendar_calendario', 'ver_ubicacion', 'llamar', 'whatsapp', 'email']
         """
         acciones = []
-        
-        # Si tiene fecha → Agendar
-        if contexto.get('fecha_hora'):
+        tipo = contexto.get('tipo_accion', '')
+        # 1. 🔥 LÓGICA DE ALARMA VS CALENDARIO
+        if tipo == 'alarma' and contexto.get('fecha_hora'):
+            # Si es explícitamente una alarma, sugerimos poner alarma
+            acciones.append('poner_alarma')
+        elif contexto.get('fecha_hora'):
+            # Si tiene fecha pero NO es alarma (es reunión, cita, etc), sugerimos calendario
             acciones.append('agendar_calendario')
         
         # Si tiene ubicación → Ver en mapa
@@ -371,6 +377,7 @@ if __name__ == "__main__":
     # Casos de prueba
     tests = [
         "Reunión con Carlos Méndez mañana a las 3pm en Av. Larco 1234, Miraflores. Llamar al 987654321 para confirmar.",
+        "Despiértame mañana a las 6am para correr",  # 🔥 Nuevo test de Alarma
         "Videollamada con María el viernes 10am por Google Meet",
         "Yapear S/ 150 a Juan (987111222) por alquiler",
         "Llamar a la inmobiliaria (014567890) para consultar depto",
