@@ -639,10 +639,13 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
     2. 'descripcion': DEBE contener todos los detalles clave: HORA exacta, LUGAR, NOMBRES.
        IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
-    3. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
-    4. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
-    5. 'prioridad': ALTA (crítico/urgente) | MEDIA (importante) | BAJA (puede esperar)
-    6. 'fecha_limite': Si hay fecha/hora, en formato ISO "2026-01-15T17:00:00"
+    4. 🔥 'link_meet': Si mencionan "videollamada", "meet", "zoom", "teams", genera un enlace de Google Meet usando este formato:
+       https://meet.google.com/new
+       (Este link abre un Meet nuevo automáticamente)
+    5. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
+    6. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
+    7. 'prioridad': ALTA (crítico/urgente) | MEDIA (importante) | BAJA (puede esperar)
+    8. 'fecha_limite': Si hay fecha/hora, en formato ISO "2026-01-15T17:00:00"
 
     JSON Schema: 
     {{
@@ -650,7 +653,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         "descripcion": "Detalle completo con la FECHA CALCULADA explícita (Ej: Cita en Loayza el 12/01 a las 9am)",
         "prioridad": "ALTA" | "MEDIA" | "BAJA",
         "etiqueta": "NEGOCIO" | "ESTUDIO" | "SALUD" | "PERSONAL" | "OTROS"
-        "fecha_limite": "2026-01-15T17:00:00" o null
+        "fecha_limite": "2026-01-15T17:00:00" o null,
+        "link_meet": "https://meet.google.com/..." o null,
+        "mensaje_usuario": "📅 Agendado: [titulo]. 🔗 Link del Meet: [link_meet si existe]"
     }}
     """
     # Variable para almacenar los datos finales a guardar
@@ -679,6 +684,10 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             titulo=data.get('titulo', 'Tarea Nueva'),
             descripcion=data.get('descripcion', mensaje)
         )
+
+        # 🔥 AGREGAR EL LINK AL CONTEXTO
+        if data.get('link_meet'):
+            contexto['link_meet'] = data['link_meet']
 
         # Si llegamos aquí, la IA funcionó perfecto
         datos_finales = {
@@ -726,6 +735,11 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 prio = datos_finales.get('prioridad', 'MEDIA')
                 emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
                 
+                # 🔥 CUERPO DE LA NOTIFICACIÓN CON LINK
+                cuerpo_noti = datos_finales['descripcion']
+                if contexto.get('link_meet'):
+                    cuerpo_noti += f"\n\n🔗 Link: {contexto['link_meet']}"
+
                 # 3. Enviar
                 enviar_push(
                     token=token,
@@ -734,6 +748,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                     data_extra={
                         "tipo": "TAREA_MANUAL",
                         "alerta_id": str(res.data[0]['id']) if res.data else "0",
+                        "link_meet": contexto.get('link_meet', ''),
                         "acciones": contexto.get('acciones_sugeridas', []),
                         "click_action": "FLUTTER_NOTIFICATION_CLICK"
                     }
@@ -751,7 +766,8 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         return {
             "status": "tarea_creada", 
             "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
-            "metadata": contexto  # Devolver para que Flutter lo use
+            "metadata": contexto, # Devolver para que Flutter lo use
+            "link_meet": contexto.get('link_meet')   
         }
 
     except Exception as e_bd:
