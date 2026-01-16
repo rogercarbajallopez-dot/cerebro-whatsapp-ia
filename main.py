@@ -622,6 +622,13 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     fecha_obj = datetime.now(zona_horaria)
     fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)") # Ej: 2026-01-05 (Lunes)
 
+    # 🔥 CORRECCIÓN: Extraer contexto PRIMERO
+    extractor = ExtractorContexto()
+    contexto = enriquecer_alerta_con_contexto(
+        titulo="Procesando...",  # Temporal
+        descripcion=mensaje
+    )
+
     prompt = f"""
     Actúa como asistente personal experto.
     HOY ES: {fecha_actual}.
@@ -667,6 +674,12 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         texto_limpio = resp.text.strip().replace("```json", "").replace("```", "")
         data = json.loads(texto_limpio)
         
+        # 🔥 ACTUALIZAR contexto con el título real de la IA
+        contexto = enriquecer_alerta_con_contexto(
+            titulo=data.get('titulo', 'Tarea Nueva'),
+            descripcion=data.get('descripcion', mensaje)
+        )
+
         # Si llegamos aquí, la IA funcionó perfecto
         datos_finales = {
             "usuario_id": usuario_id,
@@ -1149,3 +1162,6 @@ async def webhook_whatsapp(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
+
+
