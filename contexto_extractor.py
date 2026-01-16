@@ -33,7 +33,7 @@ class ExtractorContexto:
             # 🔥 NUEVO: Prioridad a Alarmas
             'alarma': ['despiértame', 'alarma', 'despertador', 'despertar', 'avísame a las', 'pon una alarma'],
             'reunion_presencial': ['reunión', 'cita', 'junta', 'encuentro', 'visita', 'ir a'],
-            'videollamada': ['zoom', 'meet', 'teams', 'videollamada', 'video llamada', 'google meet'],
+            'videollamada': ['zoom', 'meet', 'teams', 'videollamada', 'video llamada', 'google meet', 'reunión virtual', 'entrevista virtual'],
             'llamada': ['llamar', 'telefonear', 'contactar por teléfono'],
             'whatsapp': ['whatsapp', 'escribir por wsp', 'mensaje wsp', 'mandar wsp'],
             'email': ['email', 'correo', 'enviar mail', 'mandar correo'],
@@ -303,9 +303,6 @@ class ExtractorContexto:
     def determinar_acciones_sugeridas(self, contexto: Dict) -> List[str]:
         """
         Basándose en el contexto extraído, sugiere qué botones mostrar.
-        
-        Returns:
-            ['alarma', 'agendar_calendario', 'ver_ubicacion', 'llamar', 'whatsapp', 'email']
         """
         acciones = []
         tipo = contexto.get('tipo_accion', '')
@@ -313,6 +310,9 @@ class ExtractorContexto:
         if tipo == 'alarma' and contexto.get('fecha_hora'):
             # Si es explícitamente una alarma, sugerimos poner alarma
             acciones.append('poner_alarma')
+        elif tipo == 'videollamada' and contexto.get('fecha_hora'):
+            acciones.append('crear_meet')
+            acciones.append('agendar_calendario')
         elif contexto.get('fecha_hora'):
             # Si tiene fecha pero NO es alarma (es reunión, cita, etc), sugerimos calendario
             acciones.append('agendar_calendario')
@@ -333,10 +333,7 @@ class ExtractorContexto:
                     acciones.append('email')
                     break
         
-        # Si es videollamada → Crear Meet
-        if contexto['tipo_accion'] == 'videollamada':
-            acciones.append('crear_meet')
-        
+                
         # Si es pago → Abrir Yape
         if contexto['tipo_accion'] == 'pago':
             acciones.append('abrir_yape')
