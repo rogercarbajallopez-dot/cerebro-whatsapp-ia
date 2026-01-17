@@ -22,7 +22,10 @@ pyjwt
 pytz
 firebase-admin
 apscheduler
-
+google-auth==2.23.0
+google-auth-oauthlib==1.1.0
+google-auth-httplib2==0.1.1
+google-api-python-client==2.108.0
 # Truco experto: Esto instala el modelo de lenguaje directamente sin comandos extra
 httpx>=0.28.1
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
@@ -32,6 +35,7 @@ python-dateutil==2.8.2     # Parser de fechas inteligente
 phonenumbers==8.13.27      # Validación de números telefónicos
 geopy==2.4.1               # Geocodificación de direcciones
 langdetect==1.0.9          # Detección de idioma
+
 
 
 
