@@ -7,6 +7,9 @@ from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, B
 from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from gmail_service import GmailService
+from analizador_correos import AnalizadorCorreos
+
 
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
@@ -1174,6 +1177,179 @@ async def webhook_whatsapp(request: Request):
         await crear_tarea_directa(mensaje, usuario_id_webhook)
 
     return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
+
+
+# Instancia global del analizador
+analizador_correos = AnalizadorCorreos()
+
+# ==============================================================================
+# 📧 ENDPOINTS DE CORREOS (CON GMAIL API REAL)
+# ==============================================================================
+
+
+
+@app.post("/api/sincronizar-correos")
+async def sincronizar_correos(
+    request: Request,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Sincroniza correos desde Gmail usando el token del usuario.
+    Versión mejorada con contexto de remitente.
+    """
+    if not gemini_client:
+        raise HTTPException(status_code=500, detail="IA no disponible")
+    
+    try:
+        # 1. Obtener token de Gmail desde el body
+        body = await request.json()
+        gmail_token = body.get('gmail_access_token')
+        
+        if not gmail_token:
+            raise HTTPException(status_code=400, detail="Token de Gmail requerido")
+        
+        # 2. Inicializar servicio de Gmail
+        from gmail_service import GmailService
+        gmail = GmailService(access_token=gmail_token)
+        
+        # 3. Obtener correos no leídos
+        correos_gmail = gmail.obtener_correos_no_leidos(cantidad=50)
+        
+        if not correos_gmail:
+            return {
+                "status": "success",
+                "mensaje": "No hay correos nuevos",
+                "estadisticas": {"procesados": 0}
+            }
+        
+        # 4. 🔥 OBTENER DATOS DEL USUARIO (incluido el nombre)
+        user_data = supabase.table('usuarios')\
+            .select('nombre, email')\
+            .eq('id', usuario_id)\
+            .execute()
+        
+        nombre_usuario = ""
+        if user_data.data:
+            nombre = user_data.data[0].get('nombre', '')
+            email = user_data.data[0].get('email', '')
+            # Extraer nombre del email si no está configurado
+            nombre_usuario = nombre if nombre else email.split('@')[0]
+        
+        # 5. Procesar con el analizador inteligente (3 capas + contexto)
+        resultado = await analizador_correos.procesar_lote_correos(
+            correos=correos_gmail,
+            usuario_id=usuario_id,
+            gemini_client=gemini_client,
+            supabase_client=supabase,
+            nombre_usuario=nombre_usuario  # 🔥 PASAR NOMBRE
+        )
+        
+        # 6. 🔥 ENVIAR NOTIFICACIONES PUSH (solo correos críticos)
+        if resultado.get('correos_criticos'):
+            try:
+                # Obtener token FCM del usuario
+                fcm_data = supabase.table('usuarios')\
+                    .select('fcm_token')\
+                    .eq('id', usuario_id)\
+                    .execute()
+                
+                if fcm_data.data and fcm_data.data[0].get('fcm_token'):
+                    token_fcm = fcm_data.data[0]['fcm_token']
+                    
+                    # Notificar solo el más urgente (evitar spam)
+                    correo_top = resultado['correos_criticos'][0]
+                    
+                    enviar_push(
+                        token=token_fcm,
+                        titulo=f"📧 Correo Urgente: {correo_top['correo']['asunto'][:50]}...",
+                        cuerpo=f"De: {correo_top['correo']['de']}\n{correo_top['clasificacion']['resumen_corto']}",
+                        data_extra={
+                            "tipo": "CORREO_URGENTE",
+                            "correo_id": correo_top['correo']['id'],
+                            "ir_a": "correos"
+                        }
+                    )
+            except Exception as e_notif:
+                print(f"⚠️ Error enviando notificación: {e_notif}")
+        
+        # 7. Retornar estadísticas detalladas
+        return {
+            "status": "success",
+            "mensaje": f"Analizados {resultado['procesados']} correos",
+            "estadisticas": {
+                "procesados": resultado['procesados'],
+                "spam_descartado": resultado['spam_descartado'],
+                "baja_prioridad": resultado['accion_baja'],
+                "media_prioridad": resultado['accion_media'],
+                "alta_prioridad": resultado['accion_alta']
+            },
+            "correos_importantes": len(resultado['correos_criticos']),
+            "top_correo": resultado['correos_criticos'][0]['correo']['asunto'] if resultado['correos_criticos'] else None
+        }
+    
+    except HttpError as e:
+        print(f"Error de Gmail API: {e}")
+        raise HTTPException(status_code=500, detail="Error accediendo a Gmail")
+    except Exception as e:
+        print(f"Error sincronizando correos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/enviar-correo")
+async def enviar_correo_endpoint(
+    request: Request,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Envía un correo usando la cuenta de Gmail del usuario.
+    """
+    try:
+        body = await request.json()
+        
+        gmail_token = body.get('gmail_access_token')
+        destinatario = body.get('destinatario')
+        asunto = body.get('asunto')
+        cuerpo = body.get('cuerpo')
+        thread_id = body.get('thread_id')  # Para respuestas
+        
+        if not all([gmail_token, destinatario, asunto, cuerpo]):
+            raise HTTPException(status_code=400, detail="Faltan parámetros")
+        
+        # Enviar correo
+        gmail = GmailService(access_token=gmail_token)
+        exito = gmail.enviar_correo(destinatario, asunto, cuerpo, thread_id)
+        
+        if exito:
+            return {"status": "success", "mensaje": "Correo enviado"}
+        else:
+            raise HTTPException(status_code=500, detail="Error enviando correo")
+    
+    except Exception as e:
+        print(f"Error en endpoint enviar: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/correos-pendientes")
+async def obtener_correos_pendientes(
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Obtiene correos analizados que requieren acción.
+    """
+    try:
+        correos = supabase.table('correos_analizados')\
+            .select('*')\
+            .eq('usuario_id', usuario_id)\
+            .eq('requiere_accion', True)\
+            .order('score_importancia', desc=True)\
+            .limit(50)\
+            .execute()
+        
+        return {"correos": correos.data}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
