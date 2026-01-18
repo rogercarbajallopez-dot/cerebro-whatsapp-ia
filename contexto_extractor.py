@@ -149,34 +149,57 @@ class ExtractorContexto:
     def extraer_ubicacion(self, texto: str) -> Optional[Dict]:
         """
         Extrae direcciones, lugares y nombres de establecimientos.
-        
-        Returns:
-            {'direccion': str, 'lugar_nombre': str, 'lat': float, 'lng': float}
+        MEJORADO: Captura direcciones completas incluyendo distrito.
         """
-        # Patrones comunes en Perú
-        patrones_direccion = [
-            r'(Av\.|Avenida|Jr\.|Jirón|Calle|Ca\.|Psje\.|Pasaje)\s+[\w\s]+\d+',
-            r'(en|a)\s+[A-Z][\w\s]+(Miraflores|San Isidro|Surco|La Molina|Barranco|Lima)',
-        ]
-        
         ubicacion = {'direccion': None, 'lugar_nombre': None}
+        
+        # 🔥 NUEVO: Patrones mejorados para Perú
+        patrones_direccion = [
+            # Patrón completo: Distrito + Número + Calle
+            r'(en\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+de\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?)\s+(\d{1,5})\s+(Av\.|Avenida|Jr\.|Jirón|Calle|Ca\.|Psje\.|Pasaje)\s+([\w\s]+)',
+            # Patrón simple: Av/Jr/Calle + Nombre + Número
+            r'(Av\.|Avenida|Jr\.|Jirón|Calle|Ca\.|Psje\.|Pasaje)\s+([\w\s]+?)\s+(\d{1,5})',
+            # Patrón con distrito al final
+            r'(Av\.|Avenida|Jr\.|Jirón|Calle)\s+([\w\s]+)\d+[,\s]+(Miraflores|San Isidro|Surco|Santiago de Surco|La Molina|Barranco|Lima|Jesús María|Lince|San Miguel|Pueblo Libre|Magdalena|San Borja)',
+        ]
         
         for patron in patrones_direccion:
             match = re.search(patron, texto, re.IGNORECASE)
             if match:
-                ubicacion['direccion'] = match.group(0).strip()
+                # Reconstruir dirección completa
+                grupos = [g for g in match.groups() if g and g.lower() not in ['en', 'a']]
+                ubicacion['direccion'] = ' '.join(grupos).strip()
                 break
         
+        # Si no encontró nada con patrones, buscar menciones de distritos
+        if not ubicacion['direccion']:
+            distritos_peru = ['Miraflores', 'San Isidro', 'Surco', 'Santiago de Surco', 
+                            'La Molina', 'Barranco', 'Jesús María', 'San Miguel',
+                            'Pueblo Libre', 'Magdalena', 'San Borja', 'Lince']
+            
+            for distrito in distritos_peru:
+                if distrito.lower() in texto.lower():
+                    # Buscar contexto alrededor del distrito
+                    patron_contexto = rf'([^.!?]*{distrito}[^.!?]*)'
+                    match_ctx = re.search(patron_contexto, texto, re.IGNORECASE)
+                    if match_ctx:
+                        ubicacion['direccion'] = match_ctx.group(1).strip()
+                        break
+        
         # Detectar nombres de lugares conocidos
-        lugares_conocidos = ['Larcomar', 'Jockey Plaza', 'Real Plaza', 'Open Plaza', 
-                            'Clinica', 'Hospital', 'Universidad', 'Municipalidad']
+        lugares_conocidos = ['Larcomar', 'Jockey Plaza', 'Real Plaza', 'Open Plaza',
+                            'Clínica', 'Hospital', 'Universidad', 'Municipalidad', 
+                            'Parque Kennedy', 'Ovalo Gutierrez', 'Estadio Nacional']
         
         for lugar in lugares_conocidos:
             if lugar.lower() in texto.lower():
                 ubicacion['lugar_nombre'] = lugar
+                # Si no hay dirección, usar el nombre del lugar
+                if not ubicacion['direccion']:
+                    ubicacion['direccion'] = lugar
                 break
         
-        return ubicacion if ubicacion['direccion'] or ubicacion['lugar_nombre'] else None
+        return ubicacion if (ubicacion['direccion'] or ubicacion['lugar_nombre']) else None
 
     def extraer_personas(self, texto: str) -> List[Dict]:
         """
