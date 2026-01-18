@@ -140,7 +140,7 @@ class AnalizadorCorreos:
     
     async def clasificar_con_ia_rapida(self, correo: Dict, gemini_client) -> Dict:
         """
-        Usa Gemini 1.5 Flash (el más barato y rápido) solo para clasificar.
+        Usa gemini-2.5-flash (el más barato y rápido) solo para clasificar.
         NO genera respuestas todavía.
         
         Returns:
@@ -176,7 +176,7 @@ class AnalizadorCorreos:
             from google.genai import types
             
             response = gemini_client.models.generate_content(
-                model="gemini-1.5-flash",  # El más barato
+                model="gemini-2.5-flash",  # El más barato
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
