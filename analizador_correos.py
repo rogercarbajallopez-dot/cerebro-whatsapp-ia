@@ -476,9 +476,13 @@ class AnalizadorCorreos:
             if clasificacion['urgencia'] == 'alta' or score > 70:
                 # 🔥 OBTENER CONTEXTO ENRIQUECIDO
                 contexto_remitente = await self.obtener_contexto_remitente(
-                    usuario_id,
-                    correo['de'],
-                    supabase_client
+                    correos=correos,              # 🔥 AGREGAR
+                    usuario_id=usuario_id,
+                    remitente=correo['de'],
+                    gemini_client=gemini_client,  # 🔥 AGREGAR
+                    supabase_client=supabase_client,
+                    nombre_usuario=nombre_usuario,
+                    cuenta_gmail_id=cuenta_gmail_id
                 )
                 
                 # Análisis profundo con contexto
