@@ -83,6 +83,47 @@ class GmailService:
             print(f'Error obteniendo correos: {error}')
             return []
     
+    def obtener_correos_todos(self, cantidad: int = 500) -> List[Dict]:
+        """
+        Obtiene TODOS los correos (leídos y no leídos) para análisis histórico.
+        Solo se ejecuta UNA VEZ por cuenta.
+        """
+        try:
+            # Sin filtro 'is:unread' - traer todos
+            resultados = self.service.users().messages().list(
+                userId='me',
+                maxResults=cantidad
+            ).execute()
+            
+            mensajes = resultados.get('messages', [])
+            
+            if not mensajes:
+                return []
+            
+            correos_procesados = []
+            
+            for mensaje in mensajes:
+                try:
+                    msg_detail = self.service.users().messages().get(
+                        userId='me',
+                        id=mensaje['id'],
+                        format='full'
+                    ).execute()
+                    
+                    correo_estructurado = self._parsear_mensaje(msg_detail)
+                    if correo_estructurado:
+                        correos_procesados.append(correo_estructurado)
+                
+                except HttpError as e:
+                    print(f"Error obteniendo mensaje {mensaje['id']}: {e}")
+                    continue
+            
+            return correos_procesados
+        
+        except HttpError as error:
+            print(f'Error obteniendo correos: {error}')
+            return []
+
     def _parsear_mensaje(self, mensaje: Dict) -> Optional[Dict]:
         """
         Convierte un mensaje de Gmail API al formato simplificado.
