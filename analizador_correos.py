@@ -172,30 +172,44 @@ class AnalizadorCorreos:
         - urgencia = alta si mencionan plazos, fechas cercanas, o "urgente".
         - spam si es newsletter, marketing, o notificación automática.
         """
-        
-        try:
-            from google.genai import types
-            
-            response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash",  # El más barato
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1  # Más determinista = más barato
+        # INTENTAR HASTA 3 VECES SI GOOGLE NOS BLOQUEA
+        max_retries = 3
+        for intento in range(max_retries):
+            try:
+                from google.genai import types
+                
+                response = gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
                 )
-            )
+                
+                import json
+                return json.loads(response.text)
             
-            import json
-            return json.loads(response.text)
-        
-        except Exception as e:
-            print(f"Error en clasificación rápida: {e}")
-            return {
-                'requiere_accion': False,
-                'categoria': 'personal',
-                'urgencia': 'baja',
-                'resumen_corto': 'Error al clasificar'
-            }
+            except Exception as e:
+                error_str = str(e)
+                # Si es error de cuota (429), ESPERAR Y REINTENTAR
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    wait_time = 35  # Esperamos 35 segundos (los logs pedían 29s)
+                    print(f"⚠️ Cuota excedida. Pausando {wait_time}s antes de reintentar ({intento+1}/{max_retries})...")
+                    time.sleep(wait_time)
+                    continue # Vuelve al inicio del for
+                else:
+                    # Si es otro error, fallar normal
+                    print(f"Error en clasificación rápida: {e}")
+                    break
+
+        # Si fallan los 3 intentos o es otro error:
+        return {
+            'requiere_accion': False,
+            'categoria': 'personal',
+            'urgencia': 'baja',
+            'resumen_corto': 'Error al clasificar (Cuota/API)'
+        }
     
     # ================================================================
     # MODIFICAR LA FUNCIÓN `analizar_profundo` (REEMPLAZAR LA EXISTENTE)
@@ -440,7 +454,7 @@ class AnalizadorCorreos:
         correos_criticos = []
         
         for correo in correos:
-            time.sleep(5)
+            time.sleep(10)
             estadisticas['procesados'] += 1
             
             # ============================================
