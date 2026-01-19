@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import pytz
+import time
 
 class AnalizadorCorreos:
     """
@@ -413,7 +414,8 @@ class AnalizadorCorreos:
         usuario_id: str,
         gemini_client,
         supabase_client,
-        nombre_usuario: str = ""
+        nombre_usuario: str = "",
+        cuenta_gmail_id: str = None  # 👈 ¡ESTA ES LA LÍNEA NUEVA QUE FALTABA!
     ) -> Dict:
         """
         Procesa un lote de correos de forma eficiente.
@@ -689,6 +691,11 @@ Responde JSON:
                 import json
                 perfil_ia = json.loads(response.text)
                 llamadas_ia += 1
+
+                # 👇 AGREGAR ESTA PAUSA AQUÍ
+                print(f"⏳ Pausando 4 segundos para no saturar a la IA...")
+                time.sleep(4) 
+                # 👆 FIN DE LO AGREGADO
                 
                 # Guardar perfil completo
                 supabase_client.table('perfiles_contactos_gmail').insert({
