@@ -565,7 +565,17 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
                 res_alertas = supabase.table('alertas').insert(alertas).execute()
                 alertas_creadas = len(alertas)
 
-                # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
+            debe_notificar = False
+            mensaje_pedido_confirmacion = any(word in mensaje.lower() for word in [
+                "confir", "avisa", "notifica", "recuerda esto", "guardame"
+            ])
+            
+            tiene_alta_prioridad = any(t.get('prioridad') == 'ALTA' for t in tareas_detectadas)
+            
+            if mensaje_pedido_confirmacion or tiene_alta_prioridad:
+                debe_notificar = True
+            
+            if debe_notificar:
                 try:
                     # 1. Obtener Token del usuario
                     user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
@@ -573,29 +583,42 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
                     if user_data.data and user_data.data[0].get('fcm_token'):
                         token = user_data.data[0]['fcm_token']
                         
-                        # 2. Recorrer las alertas creadas para notificar
-                        # (Si son muchas, podrías limitar a enviar solo la primera)
-                        for i, item in enumerate(alertas):
-                            # Determinar emoji
+                        # 2. Crear mensaje agrupado
+                        cantidad = len(alertas)
+                        
+                        if cantidad == 1:
+                            # Si es solo una tarea, mostrar detalles completos
+                            item = alertas[0]
                             prio = item.get('prioridad', 'MEDIA')
                             emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
                             
-                            # ID real de la base de datos (si está disponible)
-                            alerta_id = str(res_alertas.data[i]['id']) if res_alertas.data else "0"
-
-                            enviar_push(
-                                token=token,
-                                titulo=f"{emoji} Nueva Tarea: {item['titulo']}",
-                                cuerpo=item['descripcion'],
-                                data_extra={
-                                    "tipo": "TAREA",
-                                    "alerta_id": alerta_id,
-                                    "click_action": "FLUTTER_NOTIFICATION_CLICK"
-                                }
-                            )
+                            titulo = f"{emoji} Nueva Tarea: {item['titulo']}"
+                            cuerpo = item['descripcion']
+                        else:
+                            # Si son varias, agrupar
+                            titulo = f"📋 {cantidad} Tareas Nuevas Guardadas"
+                            
+                            # Listar títulos
+                            lista_tareas = "\n".join([f"• {a['titulo']}" for a in alertas[:3]]) # Mostrar máximo 3
+                            if cantidad > 3:
+                                lista_tareas += f"\n... y {cantidad - 3} más"
+                            
+                            cuerpo = lista_tareas
+                        
+                        # 3. Enviar UNA SOLA notificación
+                        enviar_push(
+                            token=token,
+                            titulo=titulo,
+                            cuerpo=cuerpo,
+                            data_extra={
+                                "tipo": "TAREA",
+                                "cantidad": cantidad,
+                                "click_action": "FLUTTER_NOTIFICATION_CLICK"
+                            }
+                        )
+                        
                 except Exception as e_push:
-                    print(f"⚠️ Error enviando notificación masiva: {e_push}")
-                # 🔥🔥 FIN NOTIFICACIONES 🔥🔥
+                    print(f"⚠️ Error enviando notificación: {e_push}")
 
         # 7. Retorno final
         feedback_extra = f"\n🧠 Aprendí {memoria_guardada} cosas nuevas." if memoria_guardada > 0 else ""
@@ -701,7 +724,8 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": data.get('etiqueta', 'OTROS'),
-            "fecha_limite": data.get('fecha_limite'),
+            # En crear_tarea_directa(), REEMPLAZA la línea de fecha_limite por:
+            "fecha_limite": data.get('fecha_limite').isoformat() if data.get('fecha_limite') else None,
             "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
@@ -738,6 +762,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 prio = datos_finales.get('prioridad', 'MEDIA')
                 emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
                 
+                # 🔥 ENVIAR CON TIPO DE ACCIÓN PARA QUE FLUTTER EJECUTE
+                tipo_accion = contexto.get('tipo_accion', 'tarea_general')
+
                 # 🔥 CUERPO DE LA NOTIFICACIÓN CON LINK
                 cuerpo_noti = datos_finales['descripcion']
                 if contexto.get('link_meet'):
@@ -746,14 +773,17 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 # 3. Enviar
                 enviar_push(
                     token=token,
-                    titulo=f"{emoji} Tarea Creada: {datos_finales['titulo']}",
+                    titulo=f"{emoji} Nueva Tarea: {datos_finales['titulo']}",
                     cuerpo=datos_finales['descripcion'],
                     data_extra={
-                        "tipo": "TAREA_MANUAL",
+                        "tipo": "TAREA_EJECUTABLE",  # 🔥 CAMBIAR ESTO
                         "alerta_id": str(res.data[0]['id']) if res.data else "0",
                         "link_meet": contexto.get('link_meet', ''),
                         "acciones": contexto.get('acciones_sugeridas', []),
-                        "click_action": "FLUTTER_NOTIFICATION_CLICK"
+                        "accion_principal": tipo_accion,  # 🔥 NUEVO
+                        "ejecutar_automatico": "true",    # 🔥 NUEVO
+                        "click_action": "FLUTTER_NOTIFICATION_CLICK",
+                        "metadata": json.dumps(contexto),  # 🔥 NUEVO
                     }
                 )
         except Exception as e_push:
@@ -1079,10 +1109,17 @@ async def obtener_alertas(
     
     q = supabase.table('alertas').select('*').eq('usuario_id', usuario_id).order('created_at', desc=True)
     
-    if estado != "todas": 
+    if estado == "completada":
+        # Solo las completadas NO archivadas o de últimas 2 semanas
+        q = q.eq('estado', 'completada').or_(
+            'archivado_en.is.null,archivado_en.gt.{}'.format(
+                (datetime.now() - timedelta(days=14)).isoformat()
+            )
+        )
+    elif estado != "todas":
         q = q.eq('estado', estado)
     
-    return {"alertas": q.execute().data}
+    return {"alertas": q.order('created_at', desc=True).execute().data}
 
 @app.get("/api/alertas/prioritarias")
 async def obtener_alertas_prioritarias(
@@ -1186,33 +1223,60 @@ analizador_correos = AnalizadorCorreos()
 # 📧 ENDPOINTS DE CORREOS (CON GMAIL API REAL)
 # ==============================================================================
 
-
-
 @app.post("/api/sincronizar-correos")
 async def sincronizar_correos(
     request: Request,
     usuario_id: str = Depends(obtener_usuario_actual)
 ):
     """
-    Sincroniza correos desde Gmail usando el token del usuario.
-    Versión mejorada con contexto de remitente.
+    Sincroniza correos desde Gmail y los vincula con la cuenta correcta.
+    Ahora soporta múltiples cuentas Gmail por usuario.
     """
     if not gemini_client:
         raise HTTPException(status_code=500, detail="IA no disponible")
     
     try:
-        # 1. Obtener token de Gmail desde el body
+        # 1. Obtener datos del request
         body = await request.json()
         gmail_token = body.get('gmail_access_token')
+        email_gmail = body.get('email_gmail')  # 🔥 NUEVO: Email de la cuenta Gmail
         
         if not gmail_token:
             raise HTTPException(status_code=400, detail="Token de Gmail requerido")
         
-        # 2. Inicializar servicio de Gmail
+        # 2. 🔥 NUEVO: Buscar o crear registro de cuenta Gmail
+        cuenta_gmail_id = None
+        
+        if email_gmail:
+            # Intentar obtener la cuenta existente
+            cuenta_existente = supabase.table('cuentas_gmail')\
+                .select('id')\
+                .eq('usuario_id', usuario_id)\
+                .eq('email_gmail', email_gmail)\
+                .execute()
+            
+            if cuenta_existente.data:
+                # Ya existe, usar ese ID
+                cuenta_gmail_id = cuenta_existente.data[0]['id']
+                print(f"✅ Usando cuenta Gmail existente: {email_gmail}")
+            else:
+                # No existe, crear nueva
+                nueva_cuenta = supabase.table('cuentas_gmail').insert({
+                    'usuario_id': usuario_id,
+                    'email_gmail': email_gmail,
+                    'activo': True,
+                    'access_token': gmail_token,  # Opcional: guardar token
+                }).execute()
+                
+                if nueva_cuenta.data:
+                    cuenta_gmail_id = nueva_cuenta.data[0]['id']
+                    print(f"✅ Nueva cuenta Gmail registrada: {email_gmail}")
+        
+        # 3. Inicializar servicio de Gmail
         from gmail_service import GmailService
         gmail = GmailService(access_token=gmail_token)
         
-        # 3. Obtener correos no leídos
+        # 4. Obtener correos no leídos
         correos_gmail = gmail.obtener_correos_no_leidos(cantidad=50)
         
         if not correos_gmail:
@@ -1222,7 +1286,7 @@ async def sincronizar_correos(
                 "estadisticas": {"procesados": 0}
             }
         
-        # 4. 🔥 OBTENER DATOS DEL USUARIO (incluido el nombre)
+        # 5. Obtener datos del usuario (nombre)
         user_data = supabase.table('usuarios')\
             .select('nombre, email')\
             .eq('id', usuario_id)\
@@ -1232,22 +1296,21 @@ async def sincronizar_correos(
         if user_data.data:
             nombre = user_data.data[0].get('nombre', '')
             email = user_data.data[0].get('email', '')
-            # Extraer nombre del email si no está configurado
             nombre_usuario = nombre if nombre else email.split('@')[0]
         
-        # 5. Procesar con el analizador inteligente (3 capas + contexto)
+        # 6. Procesar correos con el analizador inteligente
         resultado = await analizador_correos.procesar_lote_correos(
             correos=correos_gmail,
             usuario_id=usuario_id,
             gemini_client=gemini_client,
             supabase_client=supabase,
-            nombre_usuario=nombre_usuario  # 🔥 PASAR NOMBRE
+            nombre_usuario=nombre_usuario,
+            cuenta_gmail_id=cuenta_gmail_id  # 🔥 NUEVO: Pasar ID de cuenta
         )
         
-        # 6. 🔥 ENVIAR NOTIFICACIONES PUSH (solo correos críticos)
+        # 7. Enviar notificaciones PUSH (solo correos críticos)
         if resultado.get('correos_criticos'):
             try:
-                # Obtener token FCM del usuario
                 fcm_data = supabase.table('usuarios')\
                     .select('fcm_token')\
                     .eq('id', usuario_id)\
@@ -1255,8 +1318,6 @@ async def sincronizar_correos(
                 
                 if fcm_data.data and fcm_data.data[0].get('fcm_token'):
                     token_fcm = fcm_data.data[0]['fcm_token']
-                    
-                    # Notificar solo el más urgente (evitar spam)
                     correo_top = resultado['correos_criticos'][0]
                     
                     enviar_push(
@@ -1272,10 +1333,11 @@ async def sincronizar_correos(
             except Exception as e_notif:
                 print(f"⚠️ Error enviando notificación: {e_notif}")
         
-        # 7. Retornar estadísticas detalladas
+        # 8. Retornar estadísticas
         return {
             "status": "success",
-            "mensaje": f"Analizados {resultado['procesados']} correos",
+            "mensaje": f"Analizados {resultado['procesados']} correos de {email_gmail or 'cuenta desconocida'}",
+            "email_cuenta": email_gmail,
             "estadisticas": {
                 "procesados": resultado['procesados'],
                 "spam_descartado": resultado['spam_descartado'],
@@ -1287,13 +1349,46 @@ async def sincronizar_correos(
             "top_correo": resultado['correos_criticos'][0]['correo']['asunto'] if resultado['correos_criticos'] else None
         }
     
-    except HttpError as e:
-        print(f"Error de Gmail API: {e}")
-        raise HTTPException(status_code=500, detail="Error accediendo a Gmail")
     except Exception as e:
         print(f"Error sincronizando correos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/analizar-historial-gmail")
+async def analizar_historial_gmail_endpoint(
+    request: Request,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Analiza TODO el historial de Gmail (una sola vez por cuenta).
+    Usa filtrado inteligente para reducir costos en 94%.
+    """
+    try:
+        body = await request.json()
+        gmail_token = body.get('gmail_access_token')
+        email_gmail = body.get('email_gmail')
+        
+        if not gmail_token or not email_gmail:
+            raise HTTPException(status_code=400, detail="Token y email requeridos")
+        
+        # Inicializar servicio
+        from gmail_service import GmailService
+        gmail = GmailService(access_token=gmail_token)
+        
+        # 🔥 USAR VERSIÓN OPTIMIZADA
+        from analizador_correos import analizar_historial_gmail_optimizado
+        resultado = await analizar_historial_gmail_optimizado(
+            usuario_id=usuario_id,
+            email_gmail=email_gmail,
+            gmail_service=gmail,
+            gemini_client=gemini_client,
+            supabase_client=supabase
+        )
+        
+        return resultado
+    
+    except Exception as e:
+        print(f"Error en análisis histórico: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/enviar-correo")
 async def enviar_correo_endpoint(
