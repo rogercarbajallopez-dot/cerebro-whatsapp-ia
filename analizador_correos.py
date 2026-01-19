@@ -440,7 +440,7 @@ class AnalizadorCorreos:
         correos_criticos = []
         
         for correo in correos:
-            time.sleep(2)
+            time.sleep(5)
             estadisticas['procesados'] += 1
             
             # ============================================
@@ -493,6 +493,16 @@ class AnalizadorCorreos:
                     contexto_adicional=contexto_remitente  # 🔥 PASAR CONTEXTO
                 )
                 
+                # Preparar fecha límite como TEXTO para evitar el error JSON
+                f_limite = analisis_completo.get('fecha_limite')
+                if hasattr(f_limite, 'isoformat'): # Si es objeto fecha, convertirlo
+                    f_limite = f_limite.isoformat()
+                elif f_limite is None:
+                    f_limite = None
+                else:
+                    f_limite = str(f_limite) # Asegurar que sea string
+
+
                 # Guardar en BD
                 datos_bd = {
                     'usuario_id': usuario_id,
@@ -507,7 +517,7 @@ class AnalizadorCorreos:
                     'respuesta_sugerida': analisis_completo['respuesta_sugerida'],
                     'tono_detectado': analisis_completo['tono_detectado'],
                     'acciones_pendientes': analisis_completo['acciones_pendientes'],
-                    'fecha_limite': analisis_completo['fecha_limite'],
+                    'fecha_limite': f_limite, # 👈 USAMOS LA VARIABLE YA CONVERTIDA
                     'metadata': {
                         'correo_id_gmail': correo.get('id'),
                         'contexto': analisis_completo.get('contexto_adicional'),
