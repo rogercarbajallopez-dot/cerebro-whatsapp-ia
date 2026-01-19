@@ -319,6 +319,7 @@ class AnalizadorCorreos:
         self,
         correos: List[Dict],
         usuario_id: str,
+        remitente: str,
         gemini_client,
         supabase_client,
         nombre_usuario: str = "",
@@ -439,6 +440,7 @@ class AnalizadorCorreos:
         correos_criticos = []
         
         for correo in correos:
+            time.sleep(2)
             estadisticas['procesados'] += 1
             
             # ============================================
