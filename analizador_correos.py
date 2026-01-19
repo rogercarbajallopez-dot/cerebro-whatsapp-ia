@@ -316,9 +316,12 @@ class AnalizadorCorreos:
 
     async def obtener_contexto_remitente(
         self,
+        correos: List[Dict],
         usuario_id: str,
-        remitente: str,
-        supabase_client
+        gemini_client,
+        supabase_client,
+        nombre_usuario: str = "",
+        cuenta_gmail_id: str = None  # 🔥 AGREGAR ESTA LÍNEA
     ) -> Dict:
         """
         Obtiene el historial de interacción con un remitente específico.
@@ -485,6 +488,7 @@ class AnalizadorCorreos:
                 # Guardar en BD
                 datos_bd = {
                     'usuario_id': usuario_id,
+                    'cuenta_gmail_id': cuenta_gmail_id,  # 🔥 AGREGAR ESTA LÍNEA
                     'remitente': correo['de'],
                     'asunto': correo['asunto'],
                     'fecha': correo.get('fecha'),
@@ -520,3 +524,229 @@ class AnalizadorCorreos:
             **estadisticas,
             'correos_criticos': correos_criticos
         }
+
+"""
+ANÁLISIS HISTÓRICO DE CORREOS - UNA SOLA VEZ POR CUENTA
+"""
+
+async def analizar_historial_gmail_optimizado(
+    usuario_id: str,
+    email_gmail: str,
+    gmail_service,
+    gemini_client,
+    supabase_client
+):
+    """
+    Analiza el historial completo de Gmail de forma ULTRA OPTIMIZADA.
+    - Filtra spam SIN usar IA
+    - Agrupa por remitente
+    - Analiza patrones estadísticamente
+    - Usa IA solo para lo crítico
+    """
+    print(f"🔍 Iniciando análisis histórico optimizado para {email_gmail}")
+    
+    try:
+        # 1. Verificar si ya se analizó
+        check = supabase_client.table('gmail_analisis_historico')\
+            .select('completado')\
+            .eq('usuario_id', usuario_id)\
+            .eq('email_gmail', email_gmail)\
+            .execute()
+        
+        if check.data and check.data[0].get('completado'):
+            return {"status": "ya_analizado", "mensaje": "Cuenta previamente analizada"}
+        
+        # 2. Obtener TODOS los correos
+        correos_gmail = gmail_service.obtener_correos_todos(cantidad=500)
+        
+        if not correos_gmail:
+            return {"status": "error", "mensaje": "No se encontraron correos"}
+        
+        print(f"📬 {len(correos_gmail)} correos descargados")
+        
+        # 3. FILTRADO PRE-IA (Capa 1)
+        analizador = AnalizadorCorreos()
+        correos_valor = []
+        spam_count = 0
+        
+        for correo in correos_gmail:
+            if analizador.es_spam_obvio(correo):
+                spam_count += 1
+                continue
+            
+            score = analizador.calcular_score_inicial(correo)
+            if score < 30:
+                spam_count += 1
+                continue
+            
+            correos_valor.append(correo)
+        
+        print(f"🗑️ Descartados {spam_count} correos sin valor")
+        print(f"💎 {len(correos_valor)} correos de valor identificados")
+        
+        # 4. AGRUPACIÓN POR REMITENTE
+        correos_por_remitente = {}
+        for correo in correos_valor:
+            remitente = correo['de']
+            if remitente not in correos_por_remitente:
+                correos_por_remitente[remitente] = []
+            correos_por_remitente[remitente].append(correo)
+        
+        # 5. ANÁLISIS ESTADÍSTICO (sin IA)
+        perfiles_creados = 0
+        llamadas_ia = 0
+        
+        # Solo los 30 remitentes más frecuentes
+        remitentes_top = sorted(
+            correos_por_remitente.items(),
+            key=lambda x: len(x[1]),
+            reverse=True
+        )[:30]
+        
+        for remitente, lista_correos in remitentes_top:
+            try:
+                # Estadísticas automáticas (sin IA)
+                total = len(lista_correos)
+                
+                # Calcular frecuencia
+                fechas = [c.get('fecha') for c in lista_correos if c.get('fecha')]
+                if len(fechas) > 1:
+                    from datetime import datetime
+                    try:
+                        primera = datetime.fromisoformat(fechas[-1].replace('Z', '+00:00'))
+                        ultima = datetime.fromisoformat(fechas[0].replace('Z', '+00:00'))
+                        dias_diff = (ultima - primera).days
+                        frecuencia = dias_diff / total if total > 1 else 0
+                    except:
+                        frecuencia = 0
+                else:
+                    frecuencia = 0
+                
+                # Hora más común
+                horas = []
+                for c in lista_correos:
+                    try:
+                        if c.get('fecha'):
+                            dt = datetime.fromisoformat(c['fecha'].replace('Z', '+00:00'))
+                            horas.append(dt.hour)
+                    except:
+                        continue
+                
+                hora_comun = max(set(horas), key=horas.count) if horas else 12
+                
+                # Longitud promedio
+                longitudes = [len(c.get('cuerpo', '')) for c in lista_correos]
+                longitud_prom = sum(longitudes) // len(longitudes) if longitudes else 0
+                
+                # Palabras clave (las 5 más comunes)
+                import re
+                from collections import Counter
+                
+                todas_palabras = []
+                for c in lista_correos:
+                    texto = (c.get('asunto', '') + ' ' + c.get('cuerpo', '')).lower()
+                    palabras = re.findall(r'\b\w{4,}\b', texto)  # Palabras de 4+ letras
+                    todas_palabras.extend(palabras)
+                
+                palabras_comunes = [p for p, _ in Counter(todas_palabras).most_common(5)]
+                
+                # 🔥 AHORA SÍ USAR IA (pero solo para entender la relación)
+                muestra = lista_correos[-3:]  # Últimos 3 correos
+                textos_muestra = [
+                    f"Asunto: {c['asunto']}\nExtracto: {c['cuerpo'][:200]}"
+                    for c in muestra
+                ]
+                
+                prompt = f"""
+Analiza estos {len(muestra)} correos del remitente: {remitente}
+
+{chr(10).join(textos_muestra)}
+
+Extrae SOLO:
+1. Tono: formal | informal | urgente | amigable
+2. Tema: laboral | academico | personal | comercial
+3. Importancia (1-10): ¿Qué tan crítico es este contacto?
+
+Responde JSON:
+{{
+    "tono_habitual": "...",
+    "tema_principal": "...",
+    "nivel_importancia": 1-10,
+    "patron_comunicacion": "Breve descripción (1 línea)"
+}}
+"""
+                
+                from google.genai import types
+                response = gemini_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.3
+                    )
+                )
+                
+                import json
+                perfil_ia = json.loads(response.text)
+                llamadas_ia += 1
+                
+                # Guardar perfil completo
+                supabase_client.table('perfiles_contactos_gmail').insert({
+                    'usuario_id': usuario_id,
+                    'email_gmail': email_gmail,
+                    'remitente': remitente,
+                    'nombre_contacto': remitente.split('@')[0],
+                    'tipo_relacion': perfil_ia.get('tema_principal', 'personal'),
+                    'nivel_importancia': perfil_ia.get('nivel_importancia', 5),
+                    'tono_habitual': perfil_ia.get('tono_habitual', 'neutro'),
+                    'temas_principales': palabras_comunes,
+                    'patron_comunicacion': perfil_ia.get('patron_comunicacion', ''),
+                    'total_correos': total,
+                    'frecuencia_dias': frecuencia,
+                    'hora_comun': hora_comun,
+                    'longitud_promedio': longitud_prom,
+                    'palabras_clave': palabras_comunes,
+                    'primer_contacto': fechas[-1] if fechas else None,
+                    'ultimo_contacto': fechas[0] if fechas else None,
+                }).execute()
+                
+                perfiles_creados += 1
+                
+            except Exception as e:
+                print(f"⚠️ Error analizando {remitente}: {e}")
+                continue
+        
+        # 6. Calcular ahorro
+        ahorro = ((len(correos_gmail) - llamadas_ia) / len(correos_gmail)) * 100 if correos_gmail else 0
+        
+        # 7. Marcar como completado
+        supabase_client.table('gmail_analisis_historico').upsert({
+            'usuario_id': usuario_id,
+            'email_gmail': email_gmail,
+            'total_correos_analizados': len(correos_gmail),
+            'correos_descartados': spam_count,
+            'correos_valor': len(correos_valor),
+            'remitentes_aprendidos': perfiles_creados,
+            'llamadas_ia_usadas': llamadas_ia,
+            'ahorro_tokens_porcentaje': round(ahorro, 2),
+            'completado': True
+        }).execute()
+        
+        print(f"✅ Análisis completado:")
+        print(f"   📊 {perfiles_creados} perfiles creados")
+        print(f"   🤖 {llamadas_ia} llamadas IA (ahorro {ahorro:.1f}%)")
+        
+        return {
+            "status": "success",
+            "total_correos": len(correos_gmail),
+            "spam_descartado": spam_count,
+            "correos_valor": len(correos_valor),
+            "remitentes_aprendidos": perfiles_creados,
+            "llamadas_ia": llamadas_ia,
+            "ahorro_porcentaje": round(ahorro, 2),
+            "mensaje": f"Análisis completado. {perfiles_creados} contactos aprendidos con {ahorro:.0f}% de ahorro."
+        }
+    
+    except Exception as e:
+        print(f"❌ Error en análisis histórico: {e}")
+        return {"status": "error", "mensaje": str(e)}
