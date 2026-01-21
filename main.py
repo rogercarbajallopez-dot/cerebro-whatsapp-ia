@@ -741,7 +741,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": "OTROS",
-            "fecha_limite": data.get('fecha_limite'),
+            "fecha_limite": None,
             "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
@@ -804,16 +804,42 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         }
 
     except Exception as e_bd:
-        # --- PASO 4: MANEJO DE ERROR DE USUARIO (Si el ID no existe) ---
-        print(f"🛑 Error Base de Datos: {e_bd}")
+        print(f"🛑 Error BD: {e_bd}")
         
-        # Aquí capturamos el error de "Usuario no existe" para que no salga "Error Crítico"
+        # 🔥 INTENTO DE AUTO-REPARACIÓN
+        if "foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower():
+            try:
+                # Verificar si el usuario existe en auth.users
+                user_data = supabase.table('usuarios').select('id').eq('id', usuario_id).execute()
+                
+                if not user_data.data:
+                    # Crear usuario faltante
+                    auth_user = supabase.auth.get_user(usuario_id)
+                    if auth_user:
+                        supabase.table('usuarios').insert({
+                            'id': usuario_id,
+                            'email': auth_user.user.email,
+                            'nombre': 'Usuario'
+                        }).execute()
+                        
+                        # Reintentar guardar tarea
+                        res = supabase.table('alertas').insert(datos_finales).execute()
+                        
+                        return {
+                            "status": "tarea_creada",
+                            "respuesta": f"✅ Agendado: {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
+                            "metadata": contexto,
+                            "link_meet": contexto.get('link_meet')
+                        }
+            except:
+                pass
+        
+        # Si todo falla, mensaje original
         return {
-            "status": "error_db", 
+            "status": "error_db",
             "respuesta": (
                 f"⚠️ Entendido: '{datos_finales['titulo']}'.\n\n"
-                "Sin embargo, no pude guardarlo en tu agenda porque tu usuario no está sincronizado correctamente con la base de datos.\n"
-                "👉 Por favor, cierra sesión y vuelve a ingresar para reactivar tu cuenta."
+                "No pude guardarlo. Cierra sesión y vuelve a entrar."
             )
         }
 
@@ -1445,10 +1471,156 @@ async def obtener_correos_pendientes(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.patch("/api/correos/{correo_id}/marcar-leido")
+async def marcar_correo_leido(
+    correo_id: str,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Marca un correo como leído en la BD.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="BD no disponible")
+    
+    try:
+        # Verificar que el correo pertenezca al usuario
+        correo = supabase.table('correos_analizados')\
+            .select('id')\
+            .eq('id', correo_id)\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        if not correo.data:
+            raise HTTPException(status_code=404, detail="Correo no encontrado")
+        
+        # Actualizar
+        supabase.table('correos_analizados').update({
+            'leido': True,
+            'requiere_accion': False  # Ya no aparecerá en pendientes
+        }).eq('id', correo_id).execute()
+        
+        return {"status": "success", "message": "Correo marcado como leído"}
+    
+    except Exception as e:
+        print(f"Error marcando leído: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==============================================================================
+# 📧 ENDPOINTS DE CORREOS RESPONDIDOS
+# ==============================================================================
+
+@app.get("/api/correos-respondidos")
+async def obtener_correos_respondidos(
+    limite: int = 50,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Obtiene el historial de correos respondidos por el usuario.
+    Incluye la respuesta que se envió.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="BD no disponible")
+    
+    try:
+        # Consulta con JOIN para obtener info completa
+        correos = supabase.table('correos_analizados')\
+            .select('*')\
+            .eq('usuario_id', usuario_id)\
+            .eq('respondido', True)\
+            .order('fecha_respuesta', desc=True)\
+            .limit(limite)\
+            .execute()
+        
+        return {
+            "status": "success",
+            "correos": correos.data,
+            "total": len(correos.data)
+        }
+    
+    except Exception as e:
+        print(f"Error obteniendo respondidos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/correos/{correo_id}/marcar-respondido")
+async def marcar_como_respondido(
+    correo_id: str,
+    body: dict = Body(...),
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Marca un correo como respondido y guarda la respuesta enviada.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="BD no disponible")
+    
+    try:
+        # Verificar que el correo pertenezca al usuario
+        correo = supabase.table('correos_analizados')\
+            .select('id')\
+            .eq('id', correo_id)\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        if not correo.data:
+            raise HTTPException(status_code=404, detail="Correo no encontrado")
+        
+        # Actualizar
+        supabase.table('correos_analizados').update({
+            'respondido': True,
+            'fecha_respuesta': body.get('fecha_respuesta'),
+            'leido': True,
+            'requiere_accion': False,
+            'metadata': {
+                **correo.data[0].get('metadata', {}),
+                'respuesta_enviada': body.get('respuesta_enviada')
+            }
+        }).eq('id', correo_id).execute()
+        
+        return {"status": "success", "message": "Correo marcado como respondido"}
+    
+    except Exception as e:
+        print(f"Error marcando respondido: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/correos/{correo_id}/revertir-respondido")
+async def revertir_respondido(
+    correo_id: str,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Revierte un correo respondido a pendiente.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="BD no disponible")
+    
+    try:
+        correo = supabase.table('correos_analizados')\
+            .select('id')\
+            .eq('id', correo_id)\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        if not correo.data:
+            raise HTTPException(status_code=404, detail="Correo no encontrado")
+        
+        supabase.table('correos_analizados').update({
+            'respondido': False,
+            'fecha_respuesta': None,
+            'requiere_accion': True,
+        }).eq('id', correo_id).execute()
+        
+        return {"status": "success", "message": "Correo revertido"}
+    
+    except Exception as e:
+        print(f"Error revirtiendo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
+
 
 
 
