@@ -525,6 +525,8 @@ class AnalizadorCorreos:
                     'asunto': correo['asunto'],
                     'fecha': correo.get('fecha'),
                     'score_importancia': score,
+                    'cuerpo_html': correo['cuerpo_html'],  # 🔥 AGREGAR
+                    'cuerpo_texto': correo['cuerpo'],
                     'categoria': clasificacion['categoria'],
                     'urgencia': clasificacion['urgencia'],
                     'requiere_accion': True,
