@@ -137,8 +137,8 @@ class GmailService:
             fecha = self._obtener_header(headers, 'Date')
             
             # Extraer cuerpo
-            cuerpo = self._extraer_cuerpo(mensaje['payload'])
-            
+            cuerpo_texto = self._extraer_cuerpo(mensaje['payload'])
+            cuerpo_html = self._extraer_cuerpo_html(mensaje['payload'])  # Nueva función
             # Limpiar email del remitente
             de_limpio = self._extraer_email(de)
             
@@ -150,7 +150,8 @@ class GmailService:
                 'de': de_limpio,
                 'de_completo': de,  # Incluye nombre: "Juan Pérez <juan@example.com>"
                 'asunto': asunto,
-                'cuerpo': cuerpo,
+                'cuerpo': cuerpo_texto,
+                'cuerpo_html': cuerpo_html,  # 🔥 NUEVO: Para UI
                 'fecha': fecha_iso,
                 'etiquetas': mensaje.get('labelIds', []),
                 'thread_id': mensaje.get('threadId')
@@ -160,6 +161,22 @@ class GmailService:
             print(f"Error parseando mensaje: {e}")
             return None
     
+    # 🔥 FUNCIÓN NUEVA
+    def _extraer_cuerpo_html(self, payload: Dict) -> str:
+        """Extrae el HTML del correo (con imágenes inline)."""
+        
+        # 1. Buscar parte HTML
+        if 'parts' in payload:
+            for part in payload['parts']:
+                if part['mimeType'] == 'text/html':
+                    if 'data' in part['body']:
+                        return self._decodificar_base64(part['body']['data'])
+        
+        # 2. Fallback: Si solo hay texto plano, convertirlo a HTML básico
+        texto = self._extraer_cuerpo(payload)
+        return f"<html><body><pre>{texto}</pre></body></html>"
+
+
     def _obtener_header(self, headers: List[Dict], nombre: str) -> str:
         """Obtiene el valor de un header específico."""
         for header in headers:
