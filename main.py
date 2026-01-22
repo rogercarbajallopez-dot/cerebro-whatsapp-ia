@@ -79,16 +79,37 @@ if not firebase_admin._apps:
 
 # Función auxiliar para enviar (Ponerla aquí para que esté disponible globalmente)
 def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
+    """
+    Envía notificación push via Firebase.
+    CORREGIDO: Convierte todos los valores a string.
+    """
     if not token or not firebase_admin._apps:
         return
     try:
+        # 🔥 CORRECCIÓN: Firebase solo acepta strings en data
+        data_limpia = {}
+        if data_extra:
+            for key, value in data_extra.items():
+                # Convertir TODO a string
+                if isinstance(value, (list, dict)):
+                    data_limpia[key] = json.dumps(value)  # JSON como string
+                elif value is None:
+                    data_limpia[key] = ""
+                else:
+                    data_limpia[key] = str(value)  # Números, bools, etc
+        
         msg = messaging.Message(
-            notification=messaging.Notification(title=titulo, body=cuerpo),
-            data=data_extra or {},
+            notification=messaging.Notification(
+                title=titulo, 
+                body=cuerpo
+            ),
+            data=data_limpia,  # ✅ Ahora todos son strings
             token=token
         )
+        
         messaging.send(msg)
-        print(f"🚀 Notificación enviada a: {token[:10]}...")
+        print(f"🚀 Notificación enviada: {titulo[:30]}...")
+        
     except Exception as e:
         print(f"❌ Error enviando push: {e}")
 # --- FIN CONFIGURACIÓN FIREBASE ---
@@ -715,6 +736,19 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         if data.get('link_meet'):
             contexto['link_meet'] = data['link_meet']
 
+
+        # 🔥 CORRECCIÓN: Manejar diferentes formatos de fecha
+        fecha_limite_raw = data.get('fecha_limite')
+        fecha_limite_final = None
+
+        if fecha_limite_raw:
+            if isinstance(fecha_limite_raw, str):
+                fecha_limite_final = fecha_limite_raw  # Ya es string
+            elif hasattr(fecha_limite_raw, 'isoformat'):
+                fecha_limite_final = fecha_limite_raw.isoformat()  # Es datetime
+            else:
+                fecha_limite_final = str(fecha_limite_raw)  # Último recurso
+
         # Si llegamos aquí, la IA funcionó perfecto
         datos_finales = {
             "usuario_id": usuario_id,
@@ -725,7 +759,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "estado": "pendiente",
             "etiqueta": data.get('etiqueta', 'OTROS'),
             # En crear_tarea_directa(), REEMPLAZA la línea de fecha_limite por:
-            "fecha_limite": data.get('fecha_limite').isoformat() if data.get('fecha_limite') else None,
+            # 🔥 CORRECCIÓN: Manejar diferentes formatos de fecha
+            # Usar la variable procesada
+            "fecha_limite": fecha_limite_final,
             "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
@@ -796,6 +832,38 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         if contexto.get('acciones_sugeridas'):
             acciones_info = f"\n🔘 Acciones disponibles: {', '.join(contexto['acciones_sugeridas'])}"
         
+        # 🔥🔥 NUEVO: AUTO-EJECUTAR ACCIONES AUTOMÁTICAMENTE 🔥🔥
+        try:
+            # 1. Obtener token del usuario
+            user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            
+            if user_data.data and user_data.data[0].get('fcm_token'):
+                token_fcm = user_data.data[0]['fcm_token']
+                tipo_accion = contexto.get('tipo_accion', 'tarea_general')
+                
+                print(f"✅ Preparando notificación ejecutable: {tipo_accion}")
+                
+                # 2. Enviar notificación EJECUTABLE
+                enviar_push(
+                    token=token_fcm,
+                    titulo=f"⚡ Nueva Tarea: {datos_finales['titulo']}",
+                    cuerpo=datos_finales['descripcion'],
+                    data_extra={
+                        "tipo": "TAREA_EJECUTABLE",
+                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
+                        "accion_principal": tipo_accion,
+                        "ejecutar_automatico": "true",
+                        "titulo": datos_finales['titulo'],
+                        "descripcion": datos_finales['descripcion'],
+                        "metadata": json.dumps(contexto),
+                    }
+                )
+                
+        except Exception as e_push:
+            print(f"⚠️ Error enviando notificación: {e_push}")
+
+        # AHORA SÍ hacer el return
+
         return {
             "status": "tarea_creada", 
             "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
