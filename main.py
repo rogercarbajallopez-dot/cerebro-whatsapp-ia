@@ -684,15 +684,27 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     
     INSTRUCCIONES CLAVE:
     1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
-    2. 'descripcion': DEBE contener todos los detalles clave: HORA exacta, LUGAR, NOMBRES.
-       IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
+    2. 'descripcion': DEBE contener todos los detalles clave: 
+        - Fecha COMPLETA calculada (Ej: "31 de enero de 2026")
+        - Hora exacta (Ej: "6:00 AM")
+        - Todos los detalles importantes
+        - LUGAR
+        - NOMBRES.
+        - IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
     4. 🔥 'link_meet': Si mencionan "videollamada", "meet", "zoom", "teams", genera un enlace de Google Meet usando este formato:
        https://meet.google.com/new
        (Este link abre un Meet nuevo automáticamente)
     5. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
     6. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
     7. 'prioridad': ALTA (crítico/urgente) | MEDIA (importante) | BAJA (puede esperar)
-    8. 'fecha_limite': Si hay fecha/hora, en formato ISO "2026-01-15T17:00:00"
+    8. 'fecha_limite': MUY IMPORTANTE
+        - Formato ISO OBLIGATORIO: "YYYY-MM-DDTHH:MM:SS"
+        - Ejemplos válidos:
+            * "31 de enero de 2026 a las 6 de la mañana" → "2026-01-31T06:00:00"
+            * "15 de febrero 8pm" → "2026-02-15T20:00:00"
+        - Si dice "6 de la mañana" son las 06:00 (AM)
+        - Si dice "8 de la mañana" son las 08:00 (AM)
+        - Si dice "3 de la tarde" son las 15:00 (PM)
 
     JSON Schema: 
     {{
@@ -742,12 +754,22 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         fecha_limite_final = None
 
         if fecha_limite_raw:
-            if isinstance(fecha_limite_raw, str):
-                fecha_limite_final = fecha_limite_raw  # Ya es string
-            elif hasattr(fecha_limite_raw, 'isoformat'):
-                fecha_limite_final = fecha_limite_raw.isoformat()  # Es datetime
-            else:
-                fecha_limite_final = str(fecha_limite_raw)  # Último recurso
+            try:
+                if isinstance(fecha_limite_raw, str):
+                    # Ya es string, validar formato ISO
+                    fecha_limite_final = fecha_limite_raw
+                elif hasattr(fecha_limite_raw, 'isoformat'):
+                    # Es objeto datetime/date, convertir
+                    fecha_limite_final = fecha_limite_raw.isoformat()
+                elif isinstance(fecha_limite_raw, (int, float)):
+                    # Es timestamp, convertir
+                    fecha_limite_final = datetime.fromtimestamp(fecha_limite_raw).isoformat()
+                else:
+                    # Último recurso
+                    fecha_limite_final = str(fecha_limite_raw)
+            except Exception as e:
+                print(f"⚠️ Error procesando fecha_limite: {e}")
+                fecha_limite_final = None
 
         # Si llegamos aquí, la IA funcionó perfecto
         datos_finales = {
