@@ -842,7 +842,12 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 tipo_accion = contexto.get('tipo_accion', 'tarea_general')
                 
                 print(f"✅ Preparando notificación ejecutable: {tipo_accion}")
-                
+                # 🔥 DEBUG: Verificar qué estamos enviando
+                print(f"🐛 DEBUG - Datos de notificación:")
+                print(f"   tipo_accion: {tipo_accion}")
+                print(f"   metadata keys: {list(contexto.keys())}")
+                print(f"   fecha_hora: {contexto.get('fecha_hora')}")
+                print(f"   acciones_sugeridas: {contexto.get('acciones_sugeridas')}")
                 # 2. Enviar notificación EJECUTABLE
                 enviar_push(
                     token=token_fcm,
