@@ -100,35 +100,97 @@ class ExtractorContexto:
                 break
         
         # 3. DETECTAR FECHAS EXACTAS (15/01, 15 de enero, etc.)
-        try:
-            fecha_parseada = date_parser.parse(texto, fuzzy=True, default=ref)
-            if fecha_parseada.date() != ref.date():  # Solo si encontró algo diferente
-                resultado['fecha'] = fecha_parseada.date()
-        except:
-            pass
+        # 3. DETECTAR FECHAS EXACTAS (MEJORADO)
+        # Patrones específicos para fechas completas
+        patrones_fecha_completa = [
+            r'(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\s+del?\s+(\d{4})',  # 31 de enero del 2026
+            r'(\d{1,2})/(\d{1,2})/(\d{4})',  # 31/01/2026
+            r'(\d{4})-(\d{1,2})-(\d{1,2})',  # 2026-01-31
+        ]
+
+        meses_es = {
+            'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4,
+            'mayo': 5, 'junio': 6, 'julio': 7, 'agosto': 8,
+            'septiembre': 9, 'octubre': 10, 'noviembre': 11, 'diciembre': 12
+        }
+
+        # Intentar con regex primero
+        for patron in patrones_fecha_completa:
+            match = re.search(patron, texto_lower)
+            if match:
+                try:
+                    if 'de' in patron:  # Formato: "31 de enero del 2026"
+                        dia = int(match.group(1))
+                        mes_nombre = match.group(2)
+                        año = int(match.group(3))
+                        mes = meses_es[mes_nombre]
+                        resultado['fecha'] = datetime(año, mes, dia).date()
+                        print(f"✅ Fecha detectada (formato texto): {resultado['fecha']}")
+                        break
+                    elif '/' in patron:  # Formato: "31/01/2026"
+                        dia = int(match.group(1))
+                        mes = int(match.group(2))
+                        año = int(match.group(3))
+                        resultado['fecha'] = datetime(año, mes, dia).date()
+                        print(f"✅ Fecha detectada (formato barra): {resultado['fecha']}")
+                        break
+                except Exception as e:
+                    print(f"⚠️ Error parseando fecha con regex: {e}")
+                    continue
+
+        # Si no se encontró con regex, intentar con dateutil
+        if not resultado['fecha']:
+            try:
+                fecha_parseada = date_parser.parse(texto, fuzzy=True, default=ref)
+                if fecha_parseada.date() != ref.date():
+                    resultado['fecha'] = fecha_parseada.date()
+                    print(f"✅ Fecha detectada (dateutil): {resultado['fecha']}")
+            except Exception as e:
+                print(f"⚠️ Error con dateutil: {e}")
         
         # 4. DETECTAR HORAS
+        # 4. DETECTAR HORAS (MEJORADO)
         patrones_hora = [
-            r'(\d{1,2})\s*(am|pm)',              # 3pm, 10am
-            r'(\d{1,2}):(\d{2})\s*(am|pm)?',     # 3:30pm, 15:00
-            r'a\s+las?\s+(\d{1,2})',             # a las 3
+            r'(\d{1,2})\s*(?:de\s+la\s+)?(mañana|tarde|noche)',  # 6 de la mañana
+            r'(\d{1,2})\s*(?::|h)\s*(\d{2})',  # 6:00, 6h00
+            r'(\d{1,2})\s*(am|pm)',  # 6am, 3pm
+            r'a\s+las?\s+(\d{1,2})',  # a las 6
         ]
-        
+
         for patron in patrones_hora:
             match = re.search(patron, texto_lower)
             if match:
                 try:
-                    if 'am' in texto_lower or 'pm' in texto_lower:
-                        hora_str = match.group(0)
-                        hora_obj = datetime.strptime(hora_str.strip(), '%I%p' if ':' not in hora_str else '%I:%M%p')
-                    else:
-                        hora = int(match.group(1))
-                        minutos = int(match.group(2)) if len(match.groups()) > 1 and match.group(2) else 0
-                        hora_obj = datetime.strptime(f"{hora}:{minutos}", "%H:%M")
+                    hora_num = int(match.group(1))
                     
-                    resultado['hora'] = hora_obj.time()
-                except:
-                    pass
+                    # Determinar AM/PM según contexto
+                    if len(match.groups()) > 1:
+                        modificador = match.group(2) if len(match.groups()) >= 2 else None
+                        
+                        if modificador in ['mañana', 'am']:
+                            # Ya es AM, no hacer nada
+                            pass
+                        elif modificador in ['tarde', 'pm']:
+                            if hora_num < 12:
+                                hora_num += 12
+                        elif modificador == 'noche':
+                            if hora_num < 12:
+                                hora_num += 12
+                    
+                    minutos = 0
+                    if len(match.groups()) >= 3 and match.group(3):
+                        try:
+                            minutos = int(match.group(3))
+                        except:
+                            pass
+                    
+                    resultado['hora'] = datetime.strptime(f"{hora_num}:{minutos}", "%H:%M").time()
+                    print(f"✅ Hora detectada: {resultado['hora']}")
+                    break
+                    
+                except Exception as e:
+                    print(f"⚠️ Error parseando hora: {e}")
+                    continue
         
         # 5. COMBINAR FECHA Y HORA EN TIMESTAMP
         if resultado['fecha']:
@@ -189,8 +251,9 @@ class ExtractorContexto:
         # Detectar nombres de lugares conocidos
         lugares_conocidos = ['Larcomar', 'Jockey Plaza', 'Real Plaza', 'Open Plaza',
                             'Clínica', 'Hospital', 'Universidad', 'Municipalidad', 
-                            'Parque Kennedy', 'Ovalo Gutierrez', 'Estadio Nacional']
-        
+                            'Parque Kennedy', 'Ovalo Gutierrez', 'Estadio Nacional',
+                            'Clínica Ricardo Palma', 'Hospital Loayza', 'Hospital Rebagliati']
+        lugar_detectado = None
         for lugar in lugares_conocidos:
             if lugar.lower() in texto.lower():
                 ubicacion['lugar_nombre'] = lugar
@@ -198,7 +261,16 @@ class ExtractorContexto:
                 if not ubicacion['direccion']:
                     ubicacion['direccion'] = lugar
                 break
-        
+        # Si NO hay lugar específico, verificar si hay dirección
+        if not ubicacion['direccion'] and not lugar_detectado:
+            # NO devolver ubicación si solo menciona "hospital" genérico
+            return None
+
+        if lugar_detectado:
+            ubicacion['lugar_nombre'] = lugar_detectado
+            if not ubicacion['direccion']:
+                ubicacion['direccion'] = lugar_detectado
+                
         return ubicacion if (ubicacion['direccion'] or ubicacion['lugar_nombre']) else None
 
     def extraer_personas(self, texto: str) -> List[Dict]:
