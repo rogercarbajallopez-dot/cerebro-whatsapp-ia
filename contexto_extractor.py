@@ -152,48 +152,60 @@ class ExtractorContexto:
         # 4. DETECTAR HORAS (MEJORADO)
         patrones_hora = [
             r'(\d{1,2})\s+(?:de\s+la\s+)?(mañana|tarde|noche)',  # 2 de la tarde
+             # Alternativo: "a las 2 de la tarde"
+            r'a\s+las?\s+(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)',
             r'(\d{1,2})\s*(?::|h)\s*(\d{2})',  # 6:00, 6h00
             r'(\d{1,2})\s*(am|pm)',  # 6am, 3pm
             r'a\s+las?\s+(\d{1,2})',  # a las 6
         ]
 
+        hora_detectada = None
+        modificador = None
+
         for patron in patrones_hora:
             match = re.search(patron, texto_lower)
             if match:
                 try:
-                    hora_num = int(match.group(1))
+                    grupos = match.groups()
                     
-                    # 🔥 CORRECCIÓN: Mejor manejo de AM/PM
-                    modificador = None
-                    if len(match.groups()) >= 2:
-                        modificador = match.group(2)
+                    # CASO 1: "2 de la tarde" (grupo 1 = hora, grupo 2 = modificador)
+                    if len(grupos) >= 2 and grupos[1] in ['mañana', 'tarde', 'noche']:
+                        hora_num = int(grupos[0])
+                        modificador = grupos[1]
+                        
+                        if modificador == 'tarde' and hora_num < 12:
+                            hora_num += 12  # "2 de la tarde" = 14:00
+                        elif modificador == 'noche' and hora_num < 12:
+                            hora_num += 12  # "8 de la noche" = 20:00
+                        # "mañana" no se modifica: "6 de la mañana" = 06:00
+                        
+                        hora_detectada = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                        print(f"✅ Hora detectada: {hora_detectada} (de la {modificador})")
+                        break
                     
-                    # Convertir "tarde" y "noche" a PM
-                    if modificador == 'tarde':
-                        if hora_num < 12:
-                            hora_num += 12
-                    elif modificador == 'noche':
-                        if hora_num < 12:
-                            hora_num += 12
-                    elif modificador == 'pm':
-                        if hora_num < 12:
-                            hora_num += 12
-                    # "mañana" o "am" ya están correctos (no hacer nada)
+                    # CASO 2: Formato "17:00"
+                    elif len(grupos) >= 2 and grupos[1].isdigit():
+                        hora_num = int(grupos[0])
+                        minutos = int(grupos[1])
+                        hora_detectada = datetime.strptime(f"{hora_num}:{minutos:02d}", "%H:%M").time()
+                        print(f"✅ Hora detectada: {hora_detectada} (formato 24h)")
+                        break
                     
-                    minutos = 0
-                    if len(match.groups()) >= 3 and match.group(3):
-                        try:
-                            minutos = int(match.group(3))
-                        except:
-                            pass
-                    
-                    resultado['hora'] = datetime.strptime(f"{hora_num}:{minutos:02d}", "%H:%M").time()
-                    print(f"✅ Hora detectada: {resultado['hora']} (modificador: {modificador})")
-                    break
-                    
+                    # CASO 3: "a las 5" (sin modificador, asumir tarde si >=1 y <=6, mañana si >=7)
+                    elif len(grupos) == 1:
+                        hora_num = int(grupos[0])
+                        if 1 <= hora_num <= 6:
+                            hora_num += 12  # "a las 5" probablemente = 17:00
+                        hora_detectada = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                        print(f"✅ Hora detectada: {hora_detectada} (inferida)")
+                        break
+                        
                 except Exception as e:
                     print(f"⚠️ Error parseando hora: {e}")
                     continue
+
+        if hora_detectada:
+            resultado['hora'] = hora_detectada
         
         # 5. COMBINAR FECHA Y HORA EN TIMESTAMP
         if resultado['fecha']:
