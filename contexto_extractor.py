@@ -151,7 +151,7 @@ class ExtractorContexto:
         # 4. DETECTAR HORAS
         # 4. DETECTAR HORAS (MEJORADO)
         patrones_hora = [
-            r'(\d{1,2})\s*(?:de\s+la\s+)?(mañana|tarde|noche)',  # 6 de la mañana
+            r'(\d{1,2})\s+(?:de\s+la\s+)?(mañana|tarde|noche)',  # 2 de la tarde
             r'(\d{1,2})\s*(?::|h)\s*(\d{2})',  # 6:00, 6h00
             r'(\d{1,2})\s*(am|pm)',  # 6am, 3pm
             r'a\s+las?\s+(\d{1,2})',  # a las 6
@@ -163,19 +163,22 @@ class ExtractorContexto:
                 try:
                     hora_num = int(match.group(1))
                     
-                    # Determinar AM/PM según contexto
-                    if len(match.groups()) > 1:
-                        modificador = match.group(2) if len(match.groups()) >= 2 else None
-                        
-                        if modificador in ['mañana', 'am']:
-                            # Ya es AM, no hacer nada
-                            pass
-                        elif modificador in ['tarde', 'pm']:
-                            if hora_num < 12:
-                                hora_num += 12
-                        elif modificador == 'noche':
-                            if hora_num < 12:
-                                hora_num += 12
+                    # 🔥 CORRECCIÓN: Mejor manejo de AM/PM
+                    modificador = None
+                    if len(match.groups()) >= 2:
+                        modificador = match.group(2)
+                    
+                    # Convertir "tarde" y "noche" a PM
+                    if modificador == 'tarde':
+                        if hora_num < 12:
+                            hora_num += 12
+                    elif modificador == 'noche':
+                        if hora_num < 12:
+                            hora_num += 12
+                    elif modificador == 'pm':
+                        if hora_num < 12:
+                            hora_num += 12
+                    # "mañana" o "am" ya están correctos (no hacer nada)
                     
                     minutos = 0
                     if len(match.groups()) >= 3 and match.group(3):
@@ -184,8 +187,8 @@ class ExtractorContexto:
                         except:
                             pass
                     
-                    resultado['hora'] = datetime.strptime(f"{hora_num}:{minutos}", "%H:%M").time()
-                    print(f"✅ Hora detectada: {resultado['hora']}")
+                    resultado['hora'] = datetime.strptime(f"{hora_num}:{minutos:02d}", "%H:%M").time()
+                    print(f"✅ Hora detectada: {resultado['hora']} (modificador: {modificador})")
                     break
                     
                 except Exception as e:
@@ -270,7 +273,7 @@ class ExtractorContexto:
             ubicacion['lugar_nombre'] = lugar_detectado
             if not ubicacion['direccion']:
                 ubicacion['direccion'] = lugar_detectado
-                
+
         return ubicacion if (ubicacion['direccion'] or ubicacion['lugar_nombre']) else None
 
     def extraer_personas(self, texto: str) -> List[Dict]:
