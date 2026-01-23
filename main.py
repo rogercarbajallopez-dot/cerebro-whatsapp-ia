@@ -718,7 +718,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         - NOMBRES.
         - IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
     4. 🔥 'link_meet': Si mencionan "videollamada", "meet", "zoom", "teams", genera un enlace de Google Meet usando este formato:
-       https://meet.google.com/new
+       https://meet.google.com/new,  Si NO menciona → null
        (Este link abre un Meet nuevo automáticamente)
     5. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
     6. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
@@ -1205,8 +1205,9 @@ async def chat_endpoint(
         
         # CASO 1: Tarea explícita ("Recuérdame...")
         if decision['tipo'] == 'TAREA':
+            # 🔥 CORRECCIÓN: Pasar SOLO el mensaje del usuario, SIN instrucciones
             res = await crear_tarea_directa(entrada.mensaje, usuario_id)
-            return {"respuesta": res['respuesta']}
+            return {"respuesta": res['respuesta'], "metadata": res.get('metadata', {})}
             
         # CASO 2: Información Valiosa ("Te paso el reporte", "Mi hija cumple años el...")
         elif decision['tipo'] == 'VALOR': 
