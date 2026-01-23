@@ -656,6 +656,32 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
         print(f"❌ Error procesando valor: {e}")
         return {"status": "error", "respuesta": f"Error procesando: {str(e)}"}
 
+def _limpiar_metadata_para_json(metadata: Dict) -> Dict:
+    """Convierte objetos date/datetime en strings"""
+    if not metadata:
+        return {}
+    
+    metadata_limpio = metadata.copy()
+    
+    if 'fecha_hora' in metadata_limpio and metadata_limpio['fecha_hora']:
+        fecha_info = metadata_limpio['fecha_hora']
+        
+        if 'fecha' in fecha_info and fecha_info['fecha']:
+            if hasattr(fecha_info['fecha'], 'isoformat'):
+                fecha_info['fecha'] = fecha_info['fecha'].isoformat()
+            elif not isinstance(fecha_info['fecha'], str):
+                fecha_info['fecha'] = str(fecha_info['fecha'])
+        
+        if 'hora' in fecha_info and fecha_info['hora']:
+            if hasattr(fecha_info['hora'], 'isoformat'):
+                fecha_info['hora'] = fecha_info['hora'].isoformat()
+            elif not isinstance(fecha_info['hora'], str):
+                fecha_info['hora'] = str(fecha_info['hora'])
+    
+    return metadata_limpio
+
+
+
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     Crea una alerta directa CON ENRIQUECIMIENTO CONTEXTUAL.(Intención TAREA).
@@ -771,6 +797,8 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 print(f"⚠️ Error procesando fecha_limite: {e}")
                 fecha_limite_final = None
 
+
+        metadata_limpio = _limpiar_metadata_para_json(contexto)
         # Si llegamos aquí, la IA funcionó perfecto
         datos_finales = {
             "usuario_id": usuario_id,
@@ -784,7 +812,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             # 🔥 CORRECCIÓN: Manejar diferentes formatos de fecha
             # Usar la variable procesada
             "fecha_limite": fecha_limite_final,
-            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
+            "metadata": metadata_limpio   # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
 
     except Exception as e_ia:
