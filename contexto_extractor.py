@@ -458,20 +458,142 @@ class ExtractorContexto:
 
 def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     """
-    Función principal para usar en el backend.
-    
-    Args:
-        titulo: Título de la alerta
-        descripcion: Descripción completa
-    
-    Returns:
-        Dict listo para guardar en columna metadata
+    Extrae automáticamente fecha, hora, ubicación y MÚLTIPLES acciones.
+    VERSIÓN CORREGIDA: Detecta TODAS las tareas mencionadas.
     """
     extractor = ExtractorContexto()
-    texto_completo = f"{titulo}. {descripcion}"
     
-    contexto = extractor.extraer_todo(texto_completo)
-    contexto['acciones_sugeridas'] = extractor.determinar_acciones_sugeridas(contexto)
+    # Texto combinado para analizar
+    texto_completo = f"{titulo} {descripcion}"
+    texto_lower = texto_completo.lower()
+    
+    print(f"🔍 Analizando contexto: {texto_completo[:100]}...")
+    
+    # ========================================================
+    # 1. EXTRAER FECHA Y HORA (HORA PRINCIPAL - para el evento)
+    # ========================================================
+    fecha_hora = extractor.extraer_fecha_hora(texto_completo)
+    
+    # ========================================================
+    # 2. DETECTAR HORA DE LA ALARMA (si es diferente)
+    # ========================================================
+    hora_alarma = None
+    
+    # Buscar patrón específico de alarma: "alarma a las X de la Y"
+    patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
+    match_alarma = re.search(patron_alarma, texto_lower)
+    
+    if match_alarma:
+        hora_num = int(match_alarma.group(1))
+        periodo = match_alarma.group(2)
+        
+        if periodo == 'tarde' and hora_num < 12:
+            hora_num += 12
+        elif periodo == 'noche' and hora_num < 12:
+            hora_num += 12
+        
+        hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+        print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
+    
+    # ========================================================
+    # 3. EXTRAER UBICACIÓN
+    # ========================================================
+    ubicacion = extractor.extraer_ubicacion(texto_completo)
+    
+    # ========================================================
+    # 4. EXTRAER PERSONAS
+    # ========================================================
+    personas = extractor.extraer_personas(texto_completo)
+    
+    # ========================================================
+    # 5. 🔥 DETECCIÓN INTELIGENTE DE ACCIONES MÚLTIPLES
+    # ========================================================
+    acciones_sugeridas = []
+    tipo_accion_principal = 'tarea_general'
+    
+    # A. ALARMA (detectar con múltiples palabras clave)
+    if any(palabra in texto_lower for palabra in [
+        'alarma', 'despertador', 'recordatorio', 'avísame', 
+        'recuérdame', 'notificación'
+    ]):
+        acciones_sugeridas.append('poner_alarma')
+        if 'alarma' in texto_lower or 'despertador' in texto_lower:
+            tipo_accion_principal = 'alarma'
+        print("🔔 ✅ Acción detectada: ALARMA")
+    
+    # B. CALENDARIO (evento principal)
+    if any(palabra in texto_lower for palabra in [
+        'agendar', 'calendario', 'cita', 'reunión', 'evento', 
+        'aparta', 'bloquea', 'reserva'
+    ]):
+        acciones_sugeridas.append('agendar_calendario')
+        if tipo_accion_principal == 'tarea_general':
+            tipo_accion_principal = 'agendar_calendario'
+        print("📅 ✅ Acción detectada: CALENDARIO")
+    
+    # C. GOOGLE MEET / VIDEOLLAMADA
+    if any(palabra in texto_lower for palabra in [
+        'meet', 'videollamada', 'zoom', 'teams', 'enlace', 
+        'link', 'transmitir', 'compartir', 'video'
+    ]):
+        acciones_sugeridas.append('crear_meet')
+        print("🎥 ✅ Acción detectada: MEET")
+    
+    # D. UBICACIÓN / MAPA
+    if ubicacion and ubicacion.get('direccion'):
+        # Verificar que no sea genérica
+        dir_lower = ubicacion['direccion'].lower()
+        if not any(generico in dir_lower for generico in [
+            'instrucción', 'usuario está', 'mensaje', 'clasifícala'
+        ]):
+            acciones_sugeridas.append('ver_ubicacion')
+            print("🗺️ ✅ Acción detectada: MAPA")
+    
+    # E. LLAMADA
+    if personas and any(p.get('telefono') for p in personas):
+        acciones_sugeridas.append('llamar')
+        print("📞 ✅ Acción detectada: LLAMADA")
+    
+    # F. WHATSAPP
+    if 'whatsapp' in texto_lower or 'wsp' in texto_lower:
+        acciones_sugeridas.append('whatsapp')
+        print("💬 ✅ Acción detectada: WHATSAPP")
+    
+    # ========================================================
+    # 6. CREAR TIMESTAMP CORRECTO
+    # ========================================================
+    timestamp_final = None
+    
+    if fecha_hora and fecha_hora.get('fecha') and fecha_hora.get('hora'):
+        try:
+            # Combinar fecha y hora
+            fecha_str = fecha_hora['fecha']
+            hora_str = fecha_hora['hora']
+            
+            # Si es objeto time, convertir a string
+            if hasattr(hora_str, 'strftime'):
+                hora_str = hora_str.strftime('%H:%M:%S')
+            
+            timestamp_final = f"{fecha_str}T{hora_str}"
+            print(f"🕐 Timestamp creado: {timestamp_final}")
+        except Exception as e:
+            print(f"⚠️ Error creando timestamp: {e}")
+    
+    # ========================================================
+    # 7. RETORNAR CONTEXTO ENRIQUECIDO
+    # ========================================================
+    contexto = {
+        'fecha_hora': fecha_hora,
+        'hora_alarma': hora_alarma.strftime('%H:%M:%S') if hora_alarma else None,
+        'ubicacion': ubicacion,
+        'personas': personas,
+        'tipo_accion': tipo_accion_principal,
+        'acciones_sugeridas': list(set(acciones_sugeridas)),  # Eliminar duplicados
+        'completitud': _calcular_completitud(fecha_hora, ubicacion, personas)
+    }
+    
+    print(f"📋 Contexto final: {len(acciones_sugeridas)} acciones detectadas")
+    print(f"   Acciones: {acciones_sugeridas}")
     
     return contexto
 
