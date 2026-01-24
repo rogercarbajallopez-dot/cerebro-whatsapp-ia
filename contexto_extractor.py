@@ -469,10 +469,8 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     
     print(f"🔍 Analizando contexto: {texto_completo[:100]}...")
     
-    # ========================================================
     # 1. EXTRAER FECHA Y HORA (HORA PRINCIPAL - para el evento)
-    # ========================================================
-    fecha_hora = extractor.extraer_fecha_hora(texto_completo)
+    fecha_hora = extractor.extraer_fecha_hora(texto_completo, datetime.now(TIMEZONE))
     
     # ========================================================
     # 2. DETECTAR HORA DE LA ALARMA (si es diferente)
@@ -524,7 +522,7 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     # B. CALENDARIO (evento principal)
     if any(palabra in texto_lower for palabra in [
         'agendar', 'calendario', 'cita', 'reunión', 'evento', 
-        'aparta', 'bloquea', 'reserva'
+        'aparta', 'bloquea', 'reserva', 'entrevista'
     ]):
         acciones_sugeridas.append('agendar_calendario')
         if tipo_accion_principal == 'tarea_general':
@@ -597,7 +595,13 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     
     return contexto
 
-
+def _calcular_completitud(fecha_hora, ubicacion, personas):
+    """Función auxiliar para calcular completitud (0-10)"""
+    puntos = 0
+    if fecha_hora: puntos += 4
+    if ubicacion: puntos += 3
+    if personas: puntos += 3
+    return min(puntos, 10)
 # ========================================================
 # TESTS (ejecutar con: python contexto_extractor.py)
 # ========================================================
