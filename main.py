@@ -798,8 +798,23 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 fecha_limite_final = None
 
 
+        # 🔥 CORRECCIÓN: Actualizar el timestamp en el contexto
+        if fecha_limite_final and contexto.get('fecha_hora'):
+            contexto['fecha_hora']['timestamp'] = fecha_limite_final
+
+        # 🔥 CORRECCIÓN: Si hay hora de alarma específica, crear timestamp adicional
+        if contexto.get('hora_alarma'):
+            try:
+                fecha_base = contexto['fecha_hora']['fecha']
+                hora_alarma = contexto['hora_alarma']
+                timestamp_alarma = f"{fecha_base}T{hora_alarma}"
+                contexto['timestamp_alarma'] = timestamp_alarma
+                print(f"⏰ Timestamp alarma: {timestamp_alarma}")
+            except Exception as e:
+                print(f"⚠️ Error creando timestamp alarma: {e}")
+
         metadata_limpio = _limpiar_metadata_para_json(contexto)
-        # Si llegamos aquí, la IA funcionó perfecto
+
         datos_finales = {
             "usuario_id": usuario_id,
             "titulo": data.get('titulo', 'Tarea Nueva'),
@@ -808,11 +823,8 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": data.get('etiqueta', 'OTROS'),
-            # En crear_tarea_directa(), REEMPLAZA la línea de fecha_limite por:
-            # 🔥 CORRECCIÓN: Manejar diferentes formatos de fecha
-            # Usar la variable procesada
             "fecha_limite": fecha_limite_final,
-            "metadata": metadata_limpio   # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
+            "metadata": metadata_limpio
         }
 
     except Exception as e_ia:
