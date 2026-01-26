@@ -488,7 +488,11 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     
     # 1. EXTRAER FECHA Y HORA (HORA PRINCIPAL - para el evento)
     fecha_hora = extractor.extraer_fecha_hora(texto_completo, datetime.now(TIMEZONE))
-    
+    # 🔥 VALIDACIÓN CRÍTICA: Verificar que se extrajo algo
+    if not fecha_hora or not fecha_hora.get('fecha'):
+        print(f"⚠️ NO SE PUDO EXTRAER FECHA del texto: {texto_completo[:100]}")
+    else:
+    print(f"✅ Fecha extraída correctamente: {fecha_hora}")
     # ========================================================
     # 2. DETECTAR HORA DE LA ALARMA (si es diferente)
     # ========================================================
@@ -589,22 +593,39 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     # ========================================================
     # 6. CREAR TIMESTAMP CORRECTO
     # ========================================================
+    # 6. CREAR TIMESTAMP CORRECTO
     timestamp_final = None
-    
-    if fecha_hora and fecha_hora.get('fecha') and fecha_hora.get('hora'):
+
+    if fecha_hora:
         try:
-            # Combinar fecha y hora
-            fecha_str = fecha_hora['fecha']
-            hora_str = fecha_hora['hora']
+            fecha_obj = fecha_hora.get('fecha')
+            hora_obj = fecha_hora.get('hora')
             
-            # Si es objeto time, convertir a string
-            if hasattr(hora_str, 'strftime'):
-                hora_str = hora_str.strftime('%H:%M:%S')
-            
-            timestamp_final = f"{fecha_str}T{hora_str}"
-            print(f"🕐 Timestamp creado: {timestamp_final}")
+            if fecha_obj and hora_obj:
+                # Convertir fecha a string si es necesario
+                if hasattr(fecha_obj, 'isoformat'):
+                    fecha_str = fecha_obj.isoformat()
+                else:
+                    fecha_str = str(fecha_obj)
+                
+                # Convertir hora a string si es necesario
+                if hasattr(hora_obj, 'strftime'):
+                    hora_str = hora_obj.strftime('%H:%M:%S')
+                else:
+                    hora_str = str(hora_obj)
+                
+                timestamp_final = f"{fecha_str}T{hora_str}"
+                print(f"🕐 Timestamp creado: {timestamp_final}")
+                
+                # 🔥 ACTUALIZAR en el objeto fecha_hora
+                fecha_hora['timestamp'] = timestamp_final
+            else:
+                print(f"⚠️ Falta fecha u hora. fecha={fecha_obj}, hora={hora_obj}")
+                
         except Exception as e:
-            print(f"⚠️ Error creando timestamp: {e}")
+            print(f"❌ Error crítico creando timestamp: {e}")
+            import traceback
+            traceback.print_exc()
     
     # ========================================================
     # 7. RETORNAR CONTEXTO ENRIQUECIDO
