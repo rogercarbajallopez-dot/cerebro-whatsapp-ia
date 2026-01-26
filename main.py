@@ -848,7 +848,28 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     try:
         # Intentamos insertar los datos
         res = supabase.table('alertas').insert(datos_finales).execute()
-        
+        # 🔥 ACTUALIZAR: Si se creó un evento en Google Calendar con Meet, actualizar el link
+        if res.data and contexto.get('acciones_sugeridas') and 'crear_meet' in contexto['acciones_sugeridas']:
+            try:
+                # Intentar obtener el link real del Meet que se creó
+                alerta_id = res.data[0]['id']
+                
+                # Esperar un momento para que se ejecute la creación del Meet
+                import asyncio
+                await asyncio.sleep(2)
+                
+                # Consultar la alerta actualizada
+                alerta_actualizada = supabase.table('alertas').select('metadata').eq('id', alerta_id).execute()
+                
+                if alerta_actualizada.data and alerta_actualizada.data[0].get('metadata', {}).get('link_meet'):
+                    link_meet_real = alerta_actualizada.data[0]['metadata']['link_meet']
+                    if link_meet_real != 'https://meet.google.com/new':
+                        contexto['link_meet'] = link_meet_real
+                        print(f"✅ Link Meet actualizado a: {link_meet_real}")
+            except Exception as e:
+                print(f"⚠️ No se pudo actualizar link Meet: {e}")
+
+
         # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
         # 🔥🔥 ENVIAR UNA SOLA NOTIFICACIÓN CON TODAS LAS ACCIONES
         try:
