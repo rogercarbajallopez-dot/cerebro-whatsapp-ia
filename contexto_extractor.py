@@ -492,7 +492,7 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     if not fecha_hora or not fecha_hora.get('fecha'):
         print(f"⚠️ NO SE PUDO EXTRAER FECHA del texto: {texto_completo[:100]}")
     else:
-    print(f"✅ Fecha extraída correctamente: {fecha_hora}")
+        print(f"✅ Fecha extraída correctamente: {fecha_hora}")
     # ========================================================
     # 2. DETECTAR HORA DE LA ALARMA (si es diferente)
     # ========================================================
