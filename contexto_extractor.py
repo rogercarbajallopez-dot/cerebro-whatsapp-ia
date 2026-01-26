@@ -149,32 +149,38 @@ class ExtractorContexto:
                 print(f"⚠️ Error con dateutil: {e}")
         
         # 4. DETECTAR HORAS
-        # 4. DETECTAR HORAS (MEJORADO)
+        # 4. DETECTAR HORAS (CORREGIDO - Prioridad a contexto)
         patrones_hora = [
-            r'(\d{1,2})\s+(?:de\s+la\s+)?(mañana|tarde|noche)',  # 2 de la tarde
-             # Alternativo: "a las 2 de la tarde"
-            r'a\s+las?\s+(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)',
-            r'(\d{1,2})\s*(?::|h)\s*(\d{2})',  # 6:00, 6h00
-            r'(\d{1,2})\s*(am|pm)',  # 6am, 3pm
-            r'a\s+las?\s+(\d{1,2})',  # a las 6
+            # 🔥 PRIORIDAD 1: "X de la tarde/mañana/noche" (MÁS ESPECÍFICO)
+            (r'(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)', 'contextual'),
+            (r'a\s+las?\s+(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)', 'contextual'),
+            
+            # PRIORIDAD 2: Formato 24h (ej: "17:00")
+            (r'(\d{1,2}):(\d{2})', '24h'),
+            
+            # PRIORIDAD 3: AM/PM
+            (r'(\d{1,2})\s*(am|pm)', 'ampm'),
+            
+            # PRIORIDAD 4: "a las X" sin contexto
+            (r'a\s+las?\s+(\d{1,2})', 'simple'),
         ]
 
         hora_detectada = None
         modificador = None
 
-        for patron in patrones_hora:
+        for patron, tipo in patrones_hora:
             match = re.search(patron, texto_lower)
             if match:
                 try:
                     grupos = match.groups()
                     
-                    # CASO 1: "2 de la tarde" (grupo 1 = hora, grupo 2 = modificador)
-                    if len(grupos) >= 2 and grupos[1] in ['mañana', 'tarde', 'noche']:
+                    # CASO 1: "5 de la tarde" (CONTEXTO: mañana/tarde/noche)
+                    if tipo == 'contextual' and len(grupos) >= 2:
                         hora_num = int(grupos[0])
                         modificador = grupos[1]
                         
                         if modificador == 'tarde' and hora_num < 12:
-                            hora_num += 12  # "2 de la tarde" = 14:00
+                            hora_num += 12  # "5 de la tarde" = 17:00
                         elif modificador == 'noche' and hora_num < 12:
                             hora_num += 12  # "8 de la noche" = 20:00
                         # "mañana" no se modifica: "6 de la mañana" = 06:00
@@ -183,19 +189,30 @@ class ExtractorContexto:
                         print(f"✅ Hora detectada: {hora_detectada} (de la {modificador})")
                         break
                     
-                    # CASO 2: Formato "17:00"
-                    elif len(grupos) >= 2 and grupos[1].isdigit():
+                    # CASO 2: Formato "17:00" (solo si NO se detectó contexto antes)
+                    elif tipo == '24h' and len(grupos) >= 2:
                         hora_num = int(grupos[0])
                         minutos = int(grupos[1])
                         hora_detectada = datetime.strptime(f"{hora_num}:{minutos:02d}", "%H:%M").time()
                         print(f"✅ Hora detectada: {hora_detectada} (formato 24h)")
                         break
                     
-                    # CASO 3: "a las 5" (sin modificador, asumir tarde si >=1 y <=6, mañana si >=7)
-                    elif len(grupos) == 1:
+                    # CASO 3: AM/PM
+                    elif tipo == 'ampm' and len(grupos) >= 2:
                         hora_num = int(grupos[0])
+                        periodo = grupos[1]
+                        if periodo == 'pm' and hora_num < 12:
+                            hora_num += 12
+                        hora_detectada = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                        print(f"✅ Hora detectada: {hora_detectada} ({periodo})")
+                        break
+                    
+                    # CASO 4: "a las 5" (inferir contexto)
+                    elif tipo == 'simple' and len(grupos) == 1:
+                        hora_num = int(grupos[0])
+                        # Heurística: 1-6 = tarde, 7-12 = mañana
                         if 1 <= hora_num <= 6:
-                            hora_num += 12  # "a las 5" probablemente = 17:00
+                            hora_num += 12
                         hora_detectada = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
                         print(f"✅ Hora detectada: {hora_detectada} (inferida)")
                         break
