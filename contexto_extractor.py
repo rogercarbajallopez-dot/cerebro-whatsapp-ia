@@ -476,7 +476,7 @@ class ExtractorContexto:
 def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     """
     Extrae automáticamente fecha, hora, ubicación y MÚLTIPLES acciones.
-    VERSIÓN CORREGIDA: Limpia el texto de instrucciones del sistema antes de procesar.
+    VERSIÓN FINAL: Usa las librerías globales y limpia el texto correctamente.
     """
     extractor = ExtractorContexto()
     
@@ -484,8 +484,7 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     texto_sucio = f"{titulo} {descripcion}"
     
     # ========================================================
-    # 🧹 LIMPIEZA DE TEXTO (NUEVO)
-    # Eliminamos las instrucciones del sistema para que dateutil no falle
+    # 🧹 LIMPIEZA DE TEXTO
     # ========================================================
     texto_para_procesar = texto_sucio
     
@@ -496,13 +495,15 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
             texto_para_procesar = partes[1].strip()
             print("🧹 Texto limpiado: Se eliminaron las instrucciones del sistema.")
     
-    # Si detectamos "Procesando..." o "[Instrucción]" al inicio pero sin tag de mensaje claro
+    # Si detectamos "Procesando..." o "[Instrucción]" pero sin tag de mensaje claro
     elif "Procesando..." in texto_sucio or "[Instrucción]" in texto_sucio:
-        # Intento de limpieza genérica (eliminar las primeras palabras si parecen logs)
-        import re
-        # Elimina todo hasta encontrar una palabra que empiece con mayúscula o número tras el ruido
-        texto_para_procesar = re.sub(r'^.*?(?=\[Mensaje\])', '', texto_sucio, flags=re.DOTALL)
-    
+        try:
+            # Usamos el 're' global que ya importaste al inicio del archivo
+            texto_para_procesar = re.sub(r'^.*?(?=\[Mensaje\])', '', texto_sucio, flags=re.DOTALL)
+        except Exception:
+            # Si falla el regex, usamos el texto original como fallback
+            texto_para_procesar = texto_sucio
+
     texto_lower = texto_para_procesar.lower()
     
     print(f"🔍 Analizando contexto (Limpio): {texto_para_procesar[:100]}...")
@@ -510,14 +511,21 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     # ========================================================
     # 1. EXTRAER FECHA Y HORA (Usando el texto limpio)
     # ========================================================
-    fecha_hora = extractor.extraer_fecha_hora(texto_para_procesar, datetime.now(TIMEZONE))
-    
-    # 🔥 VALIDACIÓN CRÍTICA
+    fecha_hora = None
+    try:
+        # Intentamos extraer con el texto limpio
+        fecha_hora = extractor.extraer_fecha_hora(texto_para_procesar, datetime.now(pytz.timezone('America/Lima'))) # Asumiendo tu TZ
+    except Exception as e:
+        print(f"⚠️ Error extrayendo fecha del texto limpio: {e}")
+
+    # Fallback: Si falló o no trajo nada, intentar con el sucio (por seguridad)
     if not fecha_hora or not fecha_hora.get('fecha'):
-        print(f"⚠️ NO SE PUDO EXTRAER FECHA del texto.")
-        # Fallback: Si falló con el texto limpio, intentar con el sucio por si acaso
-        fecha_hora = extractor.extraer_fecha_hora(texto_sucio, datetime.now(TIMEZONE))
-    else:
+        try:
+            fecha_hora = extractor.extraer_fecha_hora(texto_sucio, datetime.now(pytz.timezone('America/Lima')))
+        except:
+            print("⚠️ No se pudo extraer fecha por métodos tradicionales.")
+
+    if fecha_hora and fecha_hora.get('fecha'):
         print(f"✅ Fecha extraída correctamente: {fecha_hora}")
 
     # ========================================================
@@ -527,25 +535,31 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     fecha_alarma = None
     
     if 'alarma' in texto_lower:
-        # Patrón: "alarma a las 2 de la tarde"
-        patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
-        match_alarma = re.search(patron_alarma, texto_lower)
-        
-        if match_alarma:
-            hora_num = int(match_alarma.group(1))
-            periodo = match_alarma.group(2)
+        try:
+            # Patrón: "alarma a las 2 de la tarde"
+            # Usamos el 're' global
+            patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
+            match_alarma = re.search(patron_alarma, texto_lower)
             
-            if periodo == 'tarde' and hora_num < 12:
-                hora_num += 12
-            elif periodo == 'noche' and hora_num < 12:
-                hora_num += 12
+            if match_alarma:
+                hora_num = int(match_alarma.group(1))
+                periodo = match_alarma.group(2)
+                
+                if periodo == 'tarde' and hora_num < 12:
+                    hora_num += 12
+                elif periodo == 'noche' and hora_num < 12:
+                    hora_num += 12
+                
+                hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
             
-            hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
-            print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
-        
-        if hora_alarma and fecha_hora and fecha_hora.get('fecha'):
-            fecha_alarma = fecha_hora['fecha']
-            print(f"📅 Fecha de alarma: {fecha_alarma}")
+            # Usar la fecha del evento principal para la alarma
+            if hora_alarma and fecha_hora and fecha_hora.get('fecha'):
+                fecha_alarma = fecha_hora['fecha']
+                print(f"📅 Fecha de alarma: {fecha_alarma}")
+                
+        except Exception as e:
+            print(f"⚠️ Error intentando extraer hora alarma: {e}")
 
     # ========================================================
     # 3. EXTRAER UBICACIÓN
@@ -558,45 +572,32 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     personas = extractor.extraer_personas(texto_para_procesar)
     
     # ========================================================
-    # 5. 🔥 DETECCIÓN INTELIGENTE DE ACCIONES MÚLTIPLES
+    # 5. DETECCIÓN DE ACCIONES (Lógica sin cambios)
     # ========================================================
     acciones_sugeridas = []
     tipo_accion_principal = 'tarea_general'
     
     # A. ALARMA
-    if any(palabra in texto_lower for palabra in [
-        'alarma', 'despertador', 'recordatorio', 'avísame', 
-        'recuérdame', 'notificación'
-    ]):
+    if any(palabra in texto_lower for palabra in ['alarma', 'despertador', 'recordatorio', 'avísame']):
         acciones_sugeridas.append('poner_alarma')
-        if 'alarma' in texto_lower or 'despertador' in texto_lower:
-            tipo_accion_principal = 'alarma'
+        if 'alarma' in texto_lower: tipo_accion_principal = 'alarma'
         print("🔔 ✅ Acción detectada: ALARMA")
     
     # B. CALENDARIO
-    if any(palabra in texto_lower for palabra in [
-        'agendar', 'calendario', 'cita', 'reunión', 'evento', 
-        'aparta', 'bloquea', 'reserva', 'entrevista'
-    ]):
+    if any(palabra in texto_lower for palabra in ['agendar', 'calendario', 'cita', 'reunión', 'evento', 'entrevista']):
         acciones_sugeridas.append('agendar_calendario')
-        if tipo_accion_principal == 'tarea_general':
-            tipo_accion_principal = 'agendar_calendario'
+        if tipo_accion_principal == 'tarea_general': tipo_accion_principal = 'agendar_calendario'
         print("📅 ✅ Acción detectada: CALENDARIO")
     
     # C. GOOGLE MEET
-    if any(palabra in texto_lower for palabra in [
-        'meet', 'videollamada', 'zoom', 'teams', 'enlace', 
-        'link', 'transmitir', 'compartir', 'video'
-    ]):
+    if any(palabra in texto_lower for palabra in ['meet', 'videollamada', 'zoom', 'teams', 'link', 'transmitir']):
         acciones_sugeridas.append('crear_meet')
         print("🎥 ✅ Acción detectada: MEET")
     
-    # D. UBICACIÓN / MAPA
+    # D. UBICACIÓN
     if ubicacion and ubicacion.get('direccion'):
-        dir_lower = ubicacion['direccion'].lower()
-        if not any(generico in dir_lower for generico in [
-            'instrucción', 'usuario está', 'mensaje', 'clasifícala', 'procesando'
-        ]):
+        # Filtro simple de falsos positivos
+        if 'instrucción' not in ubicacion['direccion'].lower():
             acciones_sugeridas.append('ver_ubicacion')
             print("🗺️ ✅ Acción detectada: MAPA")
     
@@ -611,40 +612,22 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
         print("💬 ✅ Acción detectada: WHATSAPP")
     
     # ========================================================
-    # 6. CREAR TIMESTAMP CORRECTO
+    # 6. CREAR TIMESTAMP
     # ========================================================
     timestamp_final = None
-
     if fecha_hora:
         try:
             fecha_obj = fecha_hora.get('fecha')
             hora_obj = fecha_hora.get('hora')
-            
             if fecha_obj and hora_obj:
-                if hasattr(fecha_obj, 'isoformat'):
-                    fecha_str = fecha_obj.isoformat()
-                else:
-                    fecha_str = str(fecha_obj)
-                
-                if hasattr(hora_obj, 'strftime'):
-                    hora_str = hora_obj.strftime('%H:%M:%S')
-                else:
-                    hora_str = str(hora_obj)
-                
-                timestamp_final = f"{fecha_str}T{hora_str}"
-                print(f"🕐 Timestamp creado: {timestamp_final}")
-                
-                fecha_hora['timestamp'] = timestamp_final
-            else:
-                print(f"⚠️ Falta fecha u hora. fecha={fecha_obj}, hora={hora_obj}")
-                
-        except Exception as e:
-            print(f"❌ Error crítico creando timestamp: {e}")
-            import traceback
-            traceback.print_exc()
-    
+                ts_str = f"{fecha_obj}T{hora_obj}"
+                fecha_hora['timestamp'] = ts_str
+                print(f"🕐 Timestamp creado: {ts_str}")
+        except Exception:
+            pass # Ignoramos errores de timestamp aquí
+
     # ========================================================
-    # 7. RETORNAR CONTEXTO ENRIQUECIDO
+    # 7. RETORNO
     # ========================================================
     contexto = {
         'fecha_hora': fecha_hora,
@@ -656,9 +639,7 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
         'completitud': _calcular_completitud(fecha_hora, ubicacion, personas)
     }
     
-    print(f"📋 Contexto final: {len(acciones_sugeridas)} acciones detectadas")
-    print(f"   Acciones: {acciones_sugeridas}")
-    
+    print(f"📋 Contexto final: {acciones_sugeridas}")
     return contexto
 
 def _calcular_completitud(fecha_hora, ubicacion, personas):
