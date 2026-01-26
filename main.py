@@ -799,17 +799,18 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
 
         # 🔥 CORRECCIÓN: Actualizar el timestamp en el contexto
+        # 🔥 CORRECCIÓN: Actualizar el timestamp en el contexto
         if fecha_limite_final and contexto.get('fecha_hora'):
             contexto['fecha_hora']['timestamp'] = fecha_limite_final
 
-        # 🔥 CORRECCIÓN: Si hay hora de alarma específica, crear timestamp adicional
-        if contexto.get('hora_alarma'):
+        # 🔥 CORRECCIÓN CRÍTICA: Si hay hora de alarma específica, crear timestamp adicional
+        if contexto.get('hora_alarma') and contexto.get('fecha_hora', {}).get('fecha'):
             try:
                 fecha_base = contexto['fecha_hora']['fecha']
                 hora_alarma = contexto['hora_alarma']
                 timestamp_alarma = f"{fecha_base}T{hora_alarma}"
                 contexto['timestamp_alarma'] = timestamp_alarma
-                print(f"⏰ Timestamp alarma: {timestamp_alarma}")
+                print(f"⏰ Timestamp alarma creado: {timestamp_alarma}")
             except Exception as e:
                 print(f"⚠️ Error creando timestamp alarma: {e}")
 
@@ -849,44 +850,57 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         res = supabase.table('alertas').insert(datos_finales).execute()
         
         # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
+        # 🔥🔥 ENVIAR UNA SOLA NOTIFICACIÓN CON TODAS LAS ACCIONES
         try:
-            # 1. Obtener Token
             user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
             
             if user_data.data and user_data.data[0].get('fcm_token'):
                 token = user_data.data[0]['fcm_token']
                 
-                # 2. Configurar Emoji
+                # Configurar Emoji según prioridad
                 prio = datos_finales.get('prioridad', 'MEDIA')
                 emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
                 
-                # 🔥 ENVIAR CON TIPO DE ACCIÓN PARA QUE FLUTTER EJECUTE
-                tipo_accion = contexto.get('tipo_accion', 'tarea_general')
-
-                # 🔥 CUERPO DE LA NOTIFICACIÓN CON LINK
-                cuerpo_noti = datos_finales['descripcion']
-                if contexto.get('link_meet'):
-                    cuerpo_noti += f"\n\n🔗 Link: {contexto['link_meet']}"
-
-                # 3. Enviar
+                # 🔥 OBTENER TODAS LAS ACCIONES DETECTADAS
+                acciones_detectadas = contexto.get('acciones_sugeridas', [])
+                
+                print(f"🎯 Preparando notificación con {len(acciones_detectadas)} acciones")
+                
+                # Crear descripción de las acciones
+                acciones_texto = []
+                if 'poner_alarma' in acciones_detectadas:
+                    acciones_texto.append("⏰ Alarma")
+                if 'agendar_calendario' in acciones_detectadas:
+                    acciones_texto.append("📅 Calendario")
+                if 'crear_meet' in acciones_detectadas:
+                    acciones_texto.append("🎥 Meet")
+                if 'ver_ubicacion' in acciones_detectadas:
+                    acciones_texto.append("🗺️ Mapa")
+                
+                cuerpo_notificacion = f"Se ejecutarán {len(acciones_detectadas)} acciones:\n" + ", ".join(acciones_texto)
+                
+                # 🔥 ENVIAR UNA SOLA NOTIFICACIÓN
                 enviar_push(
                     token=token,
                     titulo=f"{emoji} Nueva Tarea: {datos_finales['titulo']}",
-                    cuerpo=datos_finales['descripcion'],
+                    cuerpo=cuerpo_notificacion,
                     data_extra={
-                        "tipo": "TAREA_EJECUTABLE",  # 🔥 CAMBIAR ESTO
+                        "tipo": "TAREA_EJECUTABLE",
                         "alerta_id": str(res.data[0]['id']) if res.data else "0",
-                        "link_meet": contexto.get('link_meet', ''),
-                        "acciones": contexto.get('acciones_sugeridas', []),
-                        "accion_principal": tipo_accion,  # 🔥 NUEVO
-                        "ejecutar_automatico": "true",    # 🔥 NUEVO
-                        "click_action": "FLUTTER_NOTIFICATION_CLICK",
-                        "metadata": json.dumps(contexto),  # 🔥 NUEVO
+                        "ejecutar_automatico": "true",
+                        "titulo": datos_finales['titulo'],
+                        "descripcion": datos_finales['descripcion'],
+                        "metadata": json.dumps(contexto),
+                        "acciones_totales": json.dumps(acciones_detectadas),  # 🔥 LISTA COMPLETA
+                        "total_acciones": str(len(acciones_detectadas)),
                     }
                 )
+                
+                print(f"✅ Notificación enviada con {len(acciones_detectadas)} acciones para ejecutar")
+                
         except Exception as e_push:
-            print(f"⚠️ Error enviando notificación manual: {e_push}")
-        # 🔥🔥 FIN NOTIFICACIONES 🔥🔥
+            print(f"⚠️ Error enviando notificación: {e_push}")
+        # 🔥🔥 FIN NOTIFICACIONES
         
         # ÉXITO TOTAL
         origen = "🤖 IA+Contexto" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
