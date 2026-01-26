@@ -492,24 +492,36 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     # ========================================================
     # 2. DETECTAR HORA DE LA ALARMA (si es diferente)
     # ========================================================
+    # ========================================================
+    # 2. DETECTAR HORA DE LA ALARMA (MEJORADO - Buscar en TODO el texto)
+    # ========================================================
     hora_alarma = None
+    fecha_alarma = None
+
     
-    # Buscar patrón específico de alarma: "alarma a las X de la Y"
-    patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
-    match_alarma = re.search(patron_alarma, texto_lower)
-    
-    if match_alarma:
-        hora_num = int(match_alarma.group(1))
-        periodo = match_alarma.group(2)
+    # Patrón más amplio: buscar "alarma" y luego buscar la hora más cercana
+    if 'alarma' in texto_lower:
+        # Buscar la hora específica mencionada para la alarma
+        # Patrón: "alarma a las 2 de la tarde"
+        patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
+        match_alarma = re.search(patron_alarma, texto_lower)
         
-        if periodo == 'tarde' and hora_num < 12:
-            hora_num += 12
-        elif periodo == 'noche' and hora_num < 12:
-            hora_num += 12
+        if match_alarma:
+            hora_num = int(match_alarma.group(1))
+            periodo = match_alarma.group(2)
+            
+            if periodo == 'tarde' and hora_num < 12:
+                hora_num += 12
+            elif periodo == 'noche' and hora_num < 12:
+                hora_num += 12
+            
+            hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+            print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
         
-        hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
-        print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
-    
+        # 🔥 NUEVO: Si detectamos alarma, usar la MISMA fecha del evento principal
+        if hora_alarma and fecha_hora and fecha_hora.get('fecha'):
+            fecha_alarma = fecha_hora['fecha']
+            print(f"📅 Fecha de alarma: {fecha_alarma}")
     # ========================================================
     # 3. EXTRAER UBICACIÓN
     # ========================================================
