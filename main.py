@@ -703,46 +703,65 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     )
 
     prompt = f"""
-    Actúa como asistente personal experto.
-    HOY ES: {fecha_actual}.
-    
-    Extrae una tarea estructurada del mensaje del usuario: '{mensaje}'.
-    
-    INSTRUCCIONES CLAVE:
-    1. 'titulo': Corto y directo (Ej: "Cita médica Neoplásicas").
-    2. 'descripcion': DEBE contener todos los detalles clave: 
-        - Fecha COMPLETA calculada (Ej: "31 de enero de 2026")
-        - Hora exacta (Ej: "6:00 AM")
-        - Todos los detalles importantes
-        - LUGAR
-        - NOMBRES.
-        - IMPORTANTE: Si dice "Mañana" o "Viernes", CALCULA la fecha real basándote en que HOY es {fecha_actual} e INCLUYE ESA FECHA.
-    4. 🔥 'link_meet': Si mencionan "videollamada", "meet", "zoom", "teams", genera un enlace de Google Meet usando este formato:
-       https://meet.google.com/new,  Si NO menciona → null
-       (Este link abre un Meet nuevo automáticamente)
-    5. 'etiqueta': Clasifica en [NEGOCIO, ESTUDIO, PAREJA, SALUD, PERSONAL, OTROS].
-    6. CORRECCIÓN: Si el usuario tiene errores de dedo (ej: "mesicamentos"), interpreta la palabra correcta.
-    7. 'prioridad': ALTA (crítico/urgente) | MEDIA (importante) | BAJA (puede esperar)
-    8. 'fecha_limite': MUY IMPORTANTE
-        - Formato ISO OBLIGATORIO: "YYYY-MM-DDTHH:MM:SS"
-        - Ejemplos válidos:
-            * "31 de enero de 2026 a las 6 de la mañana" → "2026-01-31T06:00:00"
-            * "15 de febrero 8pm" → "2026-02-15T20:00:00"
-        - Si dice "6 de la mañana" son las 06:00 (AM)
-        - Si dice "8 de la mañana" son las 08:00 (AM)
-        - Si dice "3 de la tarde" son las 15:00 (PM)
-
-    JSON Schema: 
-    {{
-        "titulo": "Resumen muy breve (Ej: Cita Médica)", 
-        "descripcion": "Detalle completo con la FECHA CALCULADA explícita (Ej: Cita en Loayza el 12/01 a las 9am)",
-        "prioridad": "ALTA" | "MEDIA" | "BAJA",
-        "etiqueta": "NEGOCIO" | "ESTUDIO" | "SALUD" | "PERSONAL" | "OTROS"
-        "fecha_limite": "2026-01-15T17:00:00" o null,
-        "link_meet": "https://meet.google.com/..." o null,
-        "mensaje_usuario": "📅 Agendado: [titulo]. 🔗 Link del Meet: [link_meet si existe]"
-    }}
-    """
+        Actúa como asistente personal experto en análisis de tareas.
+        
+        CONTEXTO TEMPORAL:
+        - HOY ES: {fecha_actual}
+        
+        MENSAJE DEL USUARIO:
+        "{mensaje}"
+        
+        INSTRUCCIONES CRÍTICAS (LEE COMPLETO):
+        
+        **IMPORTANTE**: Debes responder SOLO con un objeto JSON válido. NO devuelvas arrays, listas, ni texto adicional.
+        
+        Tu respuesta debe ser EXACTAMENTE un objeto JSON con esta estructura:
+        
+        {{
+            "titulo": "Texto breve del asunto",
+            "descripcion": "Descripción detallada con fecha y hora",
+            "prioridad": "ALTA",
+            "etiqueta": "NEGOCIO",
+            "fecha_limite": "2026-02-05T17:00:00",
+            "link_meet": "https://meet.google.com/new",
+            "mensaje_usuario": "Confirmación"
+        }}
+        
+        REGLAS OBLIGATORIAS:
+        
+        1. **titulo**: Máximo 50 caracteres. Ejemplo: "Entrevista BCP Product Owner"
+        
+        2. **descripcion**: DEBE incluir:
+        - Fecha COMPLETA calculada (Ejemplo: "5 de febrero de 2026")
+        - Hora EXACTA (Ejemplo: "5:00 PM" o "17:00")
+        - Lugar específico si se menciona
+        - Contexto importante
+        
+        3. **fecha_limite**: Formato ISO ESTRICTO: "YYYY-MM-DDTHH:MM:SS"
+        - "5 de la tarde" → "2026-02-05T17:00:00"
+        - "2 de la tarde" → "2026-02-05T14:00:00"
+        - Si dice "mañana", calcular basándote en que HOY es {fecha_actual}
+        
+        4. **etiqueta**: DEBE ser UNA de estas opciones:
+        - NEGOCIO (trabajo, reuniones, entrevistas)
+        - ESTUDIO (clases, exámenes)
+        - SALUD (citas médicas)
+        - PERSONAL (compras, trámites)
+        - OTROS (todo lo demás)
+        
+        5. **prioridad**: DEBE ser UNA de estas:
+        - ALTA (urgente, entrevistas, citas médicas)
+        - MEDIA (importante pero no urgente)
+        - BAJA (puede esperar)
+        
+        6. **link_meet**: 
+        - Si menciona "meet", "zoom", "videollamada", "transmitir" → "https://meet.google.com/new"
+        - Si NO menciona → null
+        
+        7. **mensaje_usuario**: Confirmación breve (Ejemplo: "Agendado: Entrevista BCP el 5/02 a las 5 PM")
+        
+        RESPONDE SOLO CON EL JSON. SIN TEXTO ADICIONAL. SIN EXPLICACIONES.
+        """
     # Variable para almacenar los datos finales a guardar
     datos_finales = {}
 
@@ -760,9 +779,29 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             )
         )
 
-        # Limpieza agresiva del texto (quita ```json, ``` y espacios)
-        texto_limpio = resp.text.strip().replace("```json", "").replace("```", "")
+        # 🔥 CORRECCIÓN: Validar la respuesta antes de parsear
+        texto_respuesta = resp.text.strip()
+        print(f"🤖 Respuesta de Gemini (primeros 200 chars): {texto_respuesta[:200]}")
+        
+        # Limpiar el texto
+        texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
+        
+        # Intentar parsear
         data = json.loads(texto_limpio)
+        
+        # 🔥 VALIDACIÓN CRÍTICA: Verificar que sea un diccionario
+        if isinstance(data, list):
+            print(f"⚠️ Gemini devolvió una LISTA en lugar de un objeto. Contenido: {data}")
+            raise Exception("Respuesta es una lista, no un objeto JSON válido")
+        
+        if not isinstance(data, dict):
+            print(f"⚠️ Gemini devolvió tipo {type(data)}: {data}")
+            raise Exception(f"Respuesta no es un objeto JSON válido: {type(data)}")
+        
+        # 🔥 VALIDACIÓN: Verificar que tenga los campos mínimos
+        if 'titulo' not in data or 'descripcion' not in data:
+            print(f"⚠️ JSON sin campos requeridos. Data: {data}")
+            raise Exception("JSON no tiene 'titulo' o 'descripcion'")
         
         # 🔥 ACTUALIZAR contexto con el título real de la IA
         contexto = enriquecer_alerta_con_contexto(
@@ -829,20 +868,41 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         }
 
     except Exception as e_ia:
-        print(f"⚠️ La IA no pudo estructurar el JSON: {e_ia}. Usando modo manual.")
+        print(f"⚠️ ERROR PROCESANDO RESPUESTA DE IA: {e_ia}")
+        print(f"   Tipo de error: {type(e_ia).__name__}")
+        
+        # 🔥 MODO FALLBACK MEJORADO: Extraer datos básicos del mensaje
+        # En lugar de solo guardar "Recordatorio Rápido", intentar extraer info
+        
+        titulo_fallback = "Recordatorio Rápido"
+        descripcion_fallback = mensaje
+        
+        # Intentar extraer un título del mensaje (primeras palabras)
+        try:
+            palabras = mensaje.split()
+            if len(palabras) >= 3:
+                # Usar las primeras 5 palabras como título
+                titulo_fallback = ' '.join(palabras[:5])
+                if len(titulo_fallback) > 50:
+                    titulo_fallback = titulo_fallback[:47] + "..."
+            print(f"📝 Título fallback: {titulo_fallback}")
+        except:
+            pass
+        
         # --- PASO 2: FALLBACK (Plan B si la IA falla) ---
-        # Si la IA falla, no nos detenemos. Preparamos los datos "en crudo".
         datos_finales = {
             "usuario_id": usuario_id,
-            "titulo": "Recordatorio Rápido", # Título genérico
-            "descripcion": mensaje,          # Guardamos el texto original tal cual
+            "titulo": titulo_fallback,
+            "descripcion": descripcion_fallback,
             "prioridad": "MEDIA",
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": "OTROS",
             "fecha_limite": None,
-            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
+            "metadata": contexto
         }
+        
+        print(f"⚠️ Usando modo fallback con título: {titulo_fallback}")
 
     # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
     try:
