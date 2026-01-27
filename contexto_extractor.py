@@ -476,10 +476,8 @@ class ExtractorContexto:
 
 def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
     """
-    Divide texto largo en fragmentos semánticos (por acciones, no por longitud arbitraria).
-    Detecta patrones coloquiales de CUALQUIER usuario.
-    
-    VERSIÓN CORREGIDA: Fragmentos más pequeños y sin contexto base redundante.
+    Divide texto largo en fragmentos semánticos (por acciones).
+    VERSIÓN FINAL CORREGIDA: Contexto mínimo para evitar ruido.
     """
     
     # Patrones de numeración
@@ -525,58 +523,58 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
             'texto': texto,
             'tipo_accion': _detectar_tipo_accion_rapida(texto),
             'posicion': 1,
-            'es_principal': True
+            'es_principal': True,
+            'contexto_base': ''
         }]
     
     # ========================================================
-    # FRAGMENTACIÓN MEJORADA
+    # EXTRACCIÓN DE CONTEXTO BASE (SOLO FECHA Y LUGAR)
+    # ========================================================
+    
+    contexto_fecha = None
+    contexto_lugar = None
+    
+    # Buscar fecha en el texto completo (antes de fragmentar)
+    patron_fecha = r'(?:el\s+)?(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)'
+    match_fecha = re.search(patron_fecha, texto_lower)
+    if match_fecha:
+        contexto_fecha = match_fecha.group(0)
+        print(f"   📅 Contexto fecha extraído: {contexto_fecha}")
+    
+    # Buscar lugar (patrones comunes en Perú)
+    lugares = ['molina', 'miraflores', 'san isidro', 'surco', 'barranco', 'lince', 'jesús maría']
+    for lugar in lugares:
+        if lugar in texto_lower:
+            # Extraer contexto alrededor del lugar
+            idx = texto_lower.find(lugar)
+            contexto_lugar = texto[max(0, idx-20):min(len(texto), idx+30)]
+            print(f"   📍 Contexto lugar extraído: {contexto_lugar}")
+            break
+    
+    # ========================================================
+    # FRAGMENTACIÓN
     # ========================================================
     
     fragmentos = []
     
-    # 1. Extraer contexto base (primera oración antes de las tareas)
-    contexto_base = ""
-    
-    # Buscar el primer indicador de tarea
-    primer_match = None
-    for patron in patrones_numeracion + patrones_secuencia:
-        match = re.search(patron, texto, re.IGNORECASE)
-        if match and (not primer_match or match.start() < primer_match.start()):
-            primer_match = match
-    
-    if primer_match:
-        contexto_previo = texto[:primer_match.start()].strip()
-        # Extraer solo información de fecha/lugar del contexto (primera oración)
-        oraciones_contexto = contexto_previo.split('.')
-        if oraciones_contexto:
-            contexto_base = oraciones_contexto[0].strip()
-            # Limitar contexto a 100 caracteres
-            if len(contexto_base) > 100:
-                # Buscar hasta la primera coma después de fecha
-                partes = contexto_base.split(',')
-                contexto_base = ','.join(partes[:2])  # Solo las primeras 2 partes
-    
-    # 2. Dividir texto en segmentos por los indicadores
+    # Buscar todos los indicadores
     patron_division = '|'.join(patrones_numeracion + patrones_secuencia)
-    
-    # Usar finditer para mantener el texto original
     matches = list(re.finditer(f'({patron_division})', texto, re.IGNORECASE))
     
     if not matches:
-        # Si no hay matches, devolver como tarea única
         return [{
             'texto': texto,
             'tipo_accion': _detectar_tipo_accion_rapida(texto),
             'posicion': 1,
-            'es_principal': True
+            'es_principal': True,
+            'contexto_base': ''
         }]
     
-    # 3. Construir fragmentos entre cada match
+    # Construir fragmentos
     posicion = 1
     for i, match in enumerate(matches):
-        inicio = match.end()  # Después del indicador
+        inicio = match.end()
         
-        # Buscar el final (siguiente indicador o fin del texto)
         if i + 1 < len(matches):
             fin = matches[i + 1].start()
         else:
@@ -584,16 +582,27 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
         
         fragmento_texto = texto[inicio:fin].strip()
         
-        # Filtrar fragmentos muy cortos
         if len(fragmento_texto) < 10:
             continue
         
-        # 🔥 CRÍTICO: Combinar SOLO con contexto base reducido (no todo el texto)
-        if contexto_base and posicion == 1:
-            # Solo el primer fragmento lleva contexto de fecha/lugar
-            texto_completo = f"{contexto_base}. {fragmento_texto}"
+        # 🔥 CRÍTICO: Construir contexto MÍNIMO
+        contexto_minimo = []
+        
+        # Solo agregar fecha si el fragmento NO tiene fecha
+        if contexto_fecha and not re.search(patron_fecha, fragmento_texto.lower()):
+            contexto_minimo.append(contexto_fecha)
+        
+        # Solo agregar lugar si el fragmento NO tiene lugar
+        if contexto_lugar and not any(l in fragmento_texto.lower() for l in lugares):
+            contexto_minimo.append(contexto_lugar)
+        
+        # Combinar contexto (máximo 50 chars)
+        contexto_str = ' '.join(contexto_minimo)[:50]
+        
+        # Texto final del fragmento
+        if contexto_str and posicion == 1:
+            texto_completo = f"{contexto_str}. {fragmento_texto}"
         else:
-            # Fragmentos subsecuentes son independientes
             texto_completo = fragmento_texto
         
         tipo = _detectar_tipo_accion_rapida(fragmento_texto)
@@ -603,7 +612,8 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
             'texto_original': fragmento_texto,
             'tipo_accion': tipo,
             'posicion': posicion,
-            'es_principal': posicion == 1
+            'es_principal': posicion == 1,
+            'contexto_base': contexto_str
         })
         
         print(f"   {posicion}. [{tipo}] {fragmento_texto[:60]}...")
@@ -611,12 +621,12 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
         posicion += 1
     
     if not fragmentos:
-        # Fallback: devolver texto completo
         return [{
             'texto': texto,
             'tipo_accion': _detectar_tipo_accion_rapida(texto),
             'posicion': 1,
-            'es_principal': True
+            'es_principal': True,
+            'contexto_base': ''
         }]
     
     print(f"\n✂️ Texto fragmentado en {len(fragmentos)} partes")
@@ -624,39 +634,6 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
     return fragmentos
 
 
-def _detectar_tipo_accion_rapida(texto: str) -> str:
-    """
-    Detección rápida de tipo de acción sin IA.
-    VERSIÓN MEJORADA: Más patrones coloquiales.
-    """
-    texto_lower = texto.lower()
-    
-    # Prioridad de detección (más específico primero)
-    if any(p in texto_lower for p in ['alarma', 'despierta', 'avisa', 'recordatorio a las', 'despertador', 'avísame a las']):
-        return 'alarma'
-    
-    if any(p in texto_lower for p in ['meet', 'zoom', 'teams', 'videollamada', 'video llamada', 'enlace', 'link de', 'crear el enlace', 'google meet']):
-        return 'meet'
-    
-    if any(p in texto_lower for p in ['calendario', 'agenda', 'cita', 'reunión', 'entrevista', 'aparta', 'bloquea', 'aparta ese espacio']):
-        return 'calendario'
-    
-    if any(p in texto_lower for p in ['mapa', 'ubicación', 'dirección', 'donde esta', 'como llego', 'dame el mapa', 'ubicacion exacta']):
-        return 'mapa'
-    
-    if any(p in texto_lower for p in ['llama', 'teléfono', 'contacta por tel', 'marca al']):
-        return 'llamada'
-    
-    if any(p in texto_lower for p in ['whatsapp', 'wsp', 'mensaje', 'escribe por']):
-        return 'whatsapp'
-    
-    if any(p in texto_lower for p in ['yape', 'paga', 'transfi', 'deposita']):
-        return 'pago'
-    
-    if any(p in texto_lower for p in ['correo', 'email', 'mail', 'envía un correo']):
-        return 'email'
-    
-    return 'general'
 
 def _detectar_tipo_accion_rapida(texto: str) -> str:
     """
@@ -754,8 +731,12 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
         print(f"\n📌 Fragmento {pos} [{tipo_frag}]:")
         
 
+        # 🔥 MEJORA 1: Detección manual de hora ANTES de usar extractor
+        hora_manual = None
+        fecha_manual = None
+        
         if tipo_frag == 'alarma':
-            # Buscar patrón específico de alarma
+            # Buscar hora específica de alarma
             patron_hora_alarma = r'(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
             match_hora = re.search(patron_hora_alarma, texto_frag.lower())
             
@@ -769,10 +750,22 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
                     hora_num += 12
                 
                 hora_manual = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
-                print(f"   🕐 Hora alarma detectada manualmente: {hora_manual}")
-        # --------------------------------------------------------
-        # A. EXTRAER FECHA/HORA DE ESTE FRAGMENTO
-        # --------------------------------------------------------
+                print(f"   🕐 Hora alarma manual: {hora_manual}")
+        
+        # 🔥 MEJORA 2: Extraer fecha del contexto base si el fragmento no tiene
+        if fragmento.get('contexto_base'):
+            try:
+                fh_contexto = extractor.extraer_fecha_hora(
+                    fragmento['contexto_base'],
+                    datetime.now(pytz.timezone('America/Lima'))
+                )
+                if fh_contexto and fh_contexto.get('fecha'):
+                    fecha_manual = fh_contexto['fecha']
+                    print(f"   📅 Fecha del contexto: {fecha_manual}")
+            except:
+                pass
+        
+        # 🔥 MEJORA 3: Intentar extracción normal
         try:
             fh = extractor.extraer_fecha_hora(
                 texto_frag,
@@ -780,23 +773,52 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
             )
             
             if fh and fh.get('fecha'):
-                print(f"   📅 Fecha: {fh['fecha']}")
-                print(f"   🕐 Hora: {fh.get('hora', 'No especificada')}")
+                print(f"   📅 Fecha fragmento: {fh['fecha']}")
+                print(f"   🕐 Hora fragmento: {fh.get('hora', 'No especificada')}")
                 
-                # 🔥 LÓGICA CRÍTICA: Asignar según tipo
-                if tipo_frag == 'alarma':
-                    # Alarma usa su propia fecha/hora
-                    fecha_hora_alarma = fh
-                    print(f"   ⏰ Asignada a ALARMA")
+                # Usar fecha del fragmento o del contexto
+                fecha_final = fh['fecha'] if fh.get('fecha') else fecha_manual
+                hora_final = hora_manual if hora_manual else fh.get('hora')
                 
-                elif tipo_frag in ['calendario', 'meet', 'general']:
-                    # Calendario usa la fecha principal
-                    if not fecha_hora_calendario or fragmento['es_principal']:
-                        fecha_hora_calendario = fh
-                        print(f"   📆 Asignada a CALENDARIO")
+                if fecha_final:
+                    # Crear objeto completo
+                    fh_final = {
+                        'fecha': fecha_final,
+                        'hora': hora_final,
+                        'timestamp': None
+                    }
+                    
+                    # Asignar según tipo
+                    if tipo_frag == 'alarma':
+                        fecha_hora_alarma = fh_final
+                        print(f"   ⏰ Asignada a ALARMA: {fecha_final} {hora_final}")
+                    
+                    elif tipo_frag in ['calendario', 'meet', 'general']:
+                        if not fecha_hora_calendario or fragmento['es_principal']:
+                            fecha_hora_calendario = fh_final
+                            print(f"   📆 Asignada a CALENDARIO: {fecha_final} {hora_final}")
+            
+            # Si no hay fecha en el fragmento pero hay hora manual y fecha del contexto
+            elif hora_manual and fecha_manual:
+                fh_final = {
+                    'fecha': fecha_manual,
+                    'hora': hora_manual,
+                    'timestamp': None
+                }
+                fecha_hora_alarma = fh_final
+                print(f"   ⏰ Alarma construida manualmente: {fecha_manual} {hora_manual}")
         
         except Exception as e:
             print(f"   ⚠️ Error extrayendo fecha: {e}")
+            
+            # Fallback: si tenemos datos manuales, usarlos
+            if hora_manual and fecha_manual:
+                fecha_hora_alarma = {
+                    'fecha': fecha_manual,
+                    'hora': hora_manual,
+                    'timestamp': None
+                }
+                print(f"   ⏰ Usando datos manuales de fallback")
         
         # --------------------------------------------------------
         # B. EXTRAER UBICACIÓN (solo una vez)
