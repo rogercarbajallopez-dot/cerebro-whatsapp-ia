@@ -787,29 +787,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
         
         # Intentar parsear
-        # 🔥 VALIDACIÓN CRÍTICA: Verificar que resp.text no sea None
-        if not resp or not resp.text:
-            print("⚠️ Gemini devolvió respuesta vacía")
-            raise Exception("Respuesta vacía de Gemini")
-
-        texto_respuesta = resp.text.strip()
-        print(f"🤖 Respuesta de Gemini (primeros 200 chars): {texto_respuesta[:200]}")
-
-        # Limpiar el texto
-        texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
-
-        # 🔥 VALIDACIÓN: Verificar que no esté vacío después de limpiar
-        if not texto_limpio:
-            print("⚠️ Texto limpio está vacío")
-            raise Exception("Texto limpio vacío")
-
-        # Intentar parsear
-        try:
-            data = json.loads(texto_limpio)
-        except json.JSONDecodeError as e:
-            print(f"⚠️ Error JSON: {e}")
-            print(f"   Texto recibido: {texto_limpio[:500]}")
-            raise Exception(f"JSON inválido: {str(e)}")
+        data = json.loads(texto_limpio)
         
         # 🔥 VALIDACIÓN CRÍTICA: Verificar que sea un diccionario
         if isinstance(data, list):
@@ -876,21 +854,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 print(f"⚠️ Error creando timestamp alarma: {e}")
 
         metadata_limpio = _limpiar_metadata_para_json(contexto)
-        # 🔥 VALIDACIÓN: Verificar que data no sea None
-        if data is None:
-            print("❌ ERROR: data es None")
-            raise Exception("Data es None después de parsear JSON")
 
-        # 🔥 VALIDACIÓN: Verificar que sea un diccionario
-        if not isinstance(data, dict):
-            print(f"❌ ERROR: data no es dict, es {type(data)}: {data}")
-            raise Exception(f"Data no es diccionario: {type(data)}")
-
-        # 🔥 VALIDACIÓN: Verificar campos mínimos
-        if 'titulo' not in data and 'descripcion' not in data:
-            print(f"⚠️ JSON sin campos requeridos. Data: {data}")
-            raise Exception("JSON sin campos título/descripción")
-            
         datos_finales = {
             "usuario_id": usuario_id,
             "titulo": data.get('titulo', 'Tarea Nueva'),
@@ -904,41 +868,20 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         }
 
     except Exception as e_ia:
-        print(f"⚠️ ERROR PROCESANDO RESPUESTA DE IA: {e_ia}")
-        print(f"   Tipo de error: {type(e_ia).__name__}")
-        
-        # 🔥 MODO FALLBACK MEJORADO: Extraer datos básicos del mensaje
-        # En lugar de solo guardar "Recordatorio Rápido", intentar extraer info
-        
-        titulo_fallback = "Recordatorio Rápido"
-        descripcion_fallback = mensaje
-        
-        # Intentar extraer un título del mensaje (primeras palabras)
-        try:
-            palabras = mensaje.split()
-            if len(palabras) >= 3:
-                # Usar las primeras 5 palabras como título
-                titulo_fallback = ' '.join(palabras[:5])
-                if len(titulo_fallback) > 50:
-                    titulo_fallback = titulo_fallback[:47] + "..."
-            print(f"📝 Título fallback: {titulo_fallback}")
-        except:
-            pass
-        
+        print(f"⚠️ La IA no pudo estructurar el JSON: {e_ia}. Usando modo manual.")
         # --- PASO 2: FALLBACK (Plan B si la IA falla) ---
+        # Si la IA falla, no nos detenemos. Preparamos los datos "en crudo".
         datos_finales = {
             "usuario_id": usuario_id,
-            "titulo": titulo_fallback,
-            "descripcion": descripcion_fallback,
+            "titulo": "Recordatorio Rápido", # Título genérico
+            "descripcion": mensaje,          # Guardamos el texto original tal cual
             "prioridad": "MEDIA",
             "tipo": "manual",
             "estado": "pendiente",
             "etiqueta": "OTROS",
             "fecha_limite": None,
-            "metadata": contexto
+            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
         }
-        
-        print(f"⚠️ Usando modo fallback con título: {titulo_fallback}")
 
     # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
     try:
