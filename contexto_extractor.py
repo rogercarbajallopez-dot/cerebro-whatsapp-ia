@@ -474,472 +474,176 @@ class ExtractorContexto:
         # Eliminar duplicados y limitar a 4 acciones
         return list(dict.fromkeys(acciones))[:4]
 
-def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
-    """
-    Divide texto largo en fragmentos semánticos (por acciones).
-    VERSIÓN FINAL CORREGIDA: Contexto mínimo para evitar ruido.
-    """
-    
-    # Patrones de numeración
-    patrones_numeracion = [
-        r'(?:^|\s)(\d+)[.)\-:]\s*',
-        r'(?:primero|segundo|tercero|cuarto|quinto|sexto)[,\s]',
-        r'(?:primera|segunda|tercera|cuarta|quinta)[,\s]',
-        r'(?:1ro|2do|3ro|4to|5to)[,\s]',
-    ]
-    
-    # Patrones de secuencia
-    patrones_secuencia = [
-        r'(?:luego|después|entonces|posteriormente)[,\s]',
-        r'(?:también|además|aparte)[,\s]',
-        r'(?:por último|finalmente|para terminar)[,\s]',
-        r'(?:y\s+(?:también|además|luego|después))[,\s]',
-    ]
-    
-    # Patrones de acción
-    patrones_accion = [
-        r'(?:recuérda|avísa|agend|program|cre|pon)[a-z]*me\s',
-        r'(?:quiero|necesito|tengo que)\s',
-        r'(?:dame|dime|muestra|busca|abre)\s',
-    ]
-    
-    texto_lower = texto.lower()
-    
-    # Contar indicadores
-    cant_numeracion = sum(1 for p in patrones_numeracion if re.search(p, texto_lower, re.IGNORECASE))
-    cant_secuencia = sum(1 for p in patrones_secuencia if re.search(p, texto_lower, re.IGNORECASE))
-    cant_acciones = len(re.findall('|'.join(patrones_accion), texto_lower, re.IGNORECASE))
-    
-    es_multiple = cant_numeracion >= 2 or cant_secuencia >= 2 or cant_acciones >= 3
-    
-    print(f"🔍 Análisis de fragmentación:")
-    print(f"   📊 Numeraciones: {cant_numeracion}")
-    print(f"   ⏭️ Secuencias: {cant_secuencia}")
-    print(f"   ⚡ Acciones: {cant_acciones}")
-    print(f"   {'✅ MÚLTIPLES TAREAS detectadas' if es_multiple else '📌 Tarea única'}")
-    
-    if not es_multiple:
-        return [{
-            'texto': texto,
-            'tipo_accion': _detectar_tipo_accion_rapida(texto),
-            'posicion': 1,
-            'es_principal': True,
-            'contexto_base': ''
-        }]
-    
-    # ========================================================
-    # EXTRACCIÓN DE CONTEXTO BASE (SOLO FECHA Y LUGAR)
-    # ========================================================
-    
-    contexto_fecha = None
-    contexto_lugar = None
-    
-    # Buscar fecha en el texto completo (antes de fragmentar)
-    patron_fecha = r'(?:el\s+)?(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)'
-    match_fecha = re.search(patron_fecha, texto_lower)
-    if match_fecha:
-        contexto_fecha = match_fecha.group(0)
-        print(f"   📅 Contexto fecha extraído: {contexto_fecha}")
-    
-    # Buscar lugar (patrones comunes en Perú)
-    lugares = ['molina', 'miraflores', 'san isidro', 'surco', 'barranco', 'lince', 'jesús maría']
-    for lugar in lugares:
-        if lugar in texto_lower:
-            # Extraer contexto alrededor del lugar
-            idx = texto_lower.find(lugar)
-            contexto_lugar = texto[max(0, idx-20):min(len(texto), idx+30)]
-            print(f"   📍 Contexto lugar extraído: {contexto_lugar}")
-            break
-    
-    # ========================================================
-    # FRAGMENTACIÓN
-    # ========================================================
-    
-    fragmentos = []
-    
-    # Buscar todos los indicadores
-    patron_division = '|'.join(patrones_numeracion + patrones_secuencia)
-    matches = list(re.finditer(f'({patron_division})', texto, re.IGNORECASE))
-    
-    if not matches:
-        return [{
-            'texto': texto,
-            'tipo_accion': _detectar_tipo_accion_rapida(texto),
-            'posicion': 1,
-            'es_principal': True,
-            'contexto_base': ''
-        }]
-    
-    # Construir fragmentos
-    posicion = 1
-    for i, match in enumerate(matches):
-        inicio = match.end()
-        
-        if i + 1 < len(matches):
-            fin = matches[i + 1].start()
-        else:
-            fin = len(texto)
-        
-        fragmento_texto = texto[inicio:fin].strip()
-        
-        if len(fragmento_texto) < 10:
-            continue
-        
-        # 🔥 CRÍTICO: Construir contexto MÍNIMO
-        contexto_minimo = []
-        
-        # Solo agregar fecha si el fragmento NO tiene fecha
-        if contexto_fecha and not re.search(patron_fecha, fragmento_texto.lower()):
-            contexto_minimo.append(contexto_fecha)
-        
-        # Solo agregar lugar si el fragmento NO tiene lugar
-        if contexto_lugar and not any(l in fragmento_texto.lower() for l in lugares):
-            contexto_minimo.append(contexto_lugar)
-        
-        # Combinar contexto (máximo 50 chars)
-        contexto_str = ' '.join(contexto_minimo)[:50]
-        
-        # Texto final del fragmento
-        if contexto_str and posicion == 1:
-            texto_completo = f"{contexto_str}. {fragmento_texto}"
-        else:
-            texto_completo = fragmento_texto
-        
-        tipo = _detectar_tipo_accion_rapida(fragmento_texto)
-        
-        fragmentos.append({
-            'texto': texto_completo,
-            'texto_original': fragmento_texto,
-            'tipo_accion': tipo,
-            'posicion': posicion,
-            'es_principal': posicion == 1,
-            'contexto_base': contexto_str
-        })
-        
-        print(f"   {posicion}. [{tipo}] {fragmento_texto[:60]}...")
-        
-        posicion += 1
-    
-    if not fragmentos:
-        return [{
-            'texto': texto,
-            'tipo_accion': _detectar_tipo_accion_rapida(texto),
-            'posicion': 1,
-            'es_principal': True,
-            'contexto_base': ''
-        }]
-    
-    print(f"\n✂️ Texto fragmentado en {len(fragmentos)} partes")
-    
-    return fragmentos
-
-
-
-def _detectar_tipo_accion_rapida(texto: str) -> str:
-    """
-    Detección rápida de tipo de acción sin IA.
-    Usada para pre-clasificar fragmentos.
-    """
-    texto_lower = texto.lower()
-    
-    # Prioridad de detección (más específico primero)
-    if any(p in texto_lower for p in ['alarma', 'despierta', 'avisa', 'recordatorio a las']):
-        return 'alarma'
-    
-    if any(p in texto_lower for p in ['meet', 'zoom', 'teams', 'videollamada', 'video llamada', 'enlace', 'link de']):
-        return 'meet'
-    
-    if any(p in texto_lower for p in ['calendario', 'agenda', 'cita', 'reunión', 'entrevista', 'aparta', 'bloquea']):
-        return 'calendario'
-    
-    if any(p in texto_lower for p in ['mapa', 'ubicación', 'dirección', 'donde esta', 'como llego']):
-        return 'mapa'
-    
-    if any(p in texto_lower for p in ['llama', 'teléfono', 'contacta por tel', 'marca al']):
-        return 'llamada'
-    
-    if any(p in texto_lower for p in ['whatsapp', 'wsp', 'mensaje', 'escribe por']):
-        return 'whatsapp'
-    
-    if any(p in texto_lower for p in ['yape', 'paga', 'transfi', 'deposita']):
-        return 'pago'
-    
-    if any(p in texto_lower for p in ['correo', 'email', 'mail', 'envía un correo']):
-        return 'email'
-    
-    return 'general'
-# ========================================================
-# FUNCIONES DE UTILIDAD
-# ========================================================
 
 def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     """
     Extrae automáticamente fecha, hora, ubicación y MÚLTIPLES acciones.
-    VERSIÓN PROFESIONAL: Adaptable a cualquier estilo de comunicación.
-    
-    Estrategia:
-    1. Limpieza de texto
-    2. Fragmentación inteligente (si es necesario)
-    3. Análisis por fragmento (fechas, horas, ubicaciones)
-    4. Consolidación de resultados
+    VERSIÓN CORREGIDA: Filtra el texto antes de procesarlo.
     """
     extractor = ExtractorContexto()
     
-    # ========================================================
-    # 1. LIMPIEZA DE TEXTO
-    # ========================================================
+    # Texto original combinado
     texto_sucio = f"{titulo} {descripcion}"
-    texto_limpio = texto_sucio
     
+    # ========================================================
+    # 🧹 LIMPIEZA DE TEXTO MEJORADA
+    # ========================================================
+    texto_para_procesar = texto_sucio
+    
+    # Si detectamos la etiqueta [Mensaje], usamos solo lo que sigue
     if "[Mensaje]" in texto_sucio:
         partes = texto_sucio.split("[Mensaje]")
         if len(partes) > 1:
-            texto_limpio = partes[1].strip()
-            print("🧹 Texto limpiado: Instrucciones removidas")
+            texto_para_procesar = partes[1].strip()
+            print("🧹 Texto limpiado: Se eliminaron las instrucciones del sistema.")
+    
+    # Si detectamos "Procesando..." o "[Instrucción]" pero sin tag de mensaje claro
     elif "Procesando..." in texto_sucio or "[Instrucción]" in texto_sucio:
         try:
-            texto_limpio = re.sub(r'^.*?(?=\[Mensaje\])', '', texto_sucio, flags=re.DOTALL)
+            texto_para_procesar = re.sub(r'^.*?(?=\[Mensaje\])', '', texto_sucio, flags=re.DOTALL)
+        except Exception:
+            texto_para_procesar = texto_sucio
+    # 🔥 NUEVA CORRECCIÓN: Crear versión corta SOLO para el print
+    if len(texto_para_procesar) > 100:
+        texto_para_mostrar = texto_para_procesar[:100] + "..."
+    else:
+        texto_para_mostrar = texto_para_procesar
+    
+    print(f"🔍 Analizando contexto (Limpio): {texto_para_mostrar}")
+    
+    # 🔥 IMPORTANTE: Convertir a minúsculas DESPUÉS de limpiar
+    texto_lower = texto_para_procesar.lower()
+    print(f"🔍 Analizando contexto (Limpio): {texto_para_procesar[:100]}...")
+    
+    # ========================================================
+    # 1. EXTRAER FECHA Y HORA (Usando el texto limpio)
+    # ========================================================
+    fecha_hora = None
+    try:
+        # Intentamos extraer con el texto limpio
+        fecha_hora = extractor.extraer_fecha_hora(texto_para_procesar, datetime.now(pytz.timezone('America/Lima'))) # Asumiendo tu TZ
+    except Exception as e:
+        print(f"⚠️ Error extrayendo fecha del texto limpio: {e}")
+    # Fallback: Si falló o no trajo nada, intentar con el sucio (por seguridad)
+    if not fecha_hora or not fecha_hora.get('fecha'):
+        try:
+            fecha_hora = extractor.extraer_fecha_hora(texto_sucio, datetime.now(pytz.timezone('America/Lima')))
         except:
-            texto_limpio = texto_sucio
-    
-    # Mostrar preview
-    preview = texto_limpio[:100] + "..." if len(texto_limpio) > 100 else texto_limpio
-    print(f"🔍 Analizando: {preview}")
-    
+            print("⚠️ No se pudo extraer fecha por métodos tradicionales.")
+    if fecha_hora and fecha_hora.get('fecha'):
+        print(f"✅ Fecha extraída correctamente: {fecha_hora}")
     # ========================================================
-    # 2. FRAGMENTACIÓN INTELIGENTE
+    # 2. DETECTAR HORA DE LA ALARMA
     # ========================================================
-    fragmentos = fragmentar_texto_inteligente(texto_limpio)
+    hora_alarma = None
+    fecha_alarma = None
     
-    # ========================================================
-    # 3. ANÁLISIS POR FRAGMENTO
-    # ========================================================
-    
-    # Contenedores para resultados consolidados
-    fecha_hora_calendario = None  # Para calendario/meet
-    fecha_hora_alarma = None      # Para alarma específica
-    ubicacion_final = None
-    personas_final = None
-    acciones_detectadas = []
-    link_meet = None
-    
-    for fragmento in fragmentos:
-        texto_frag = fragmento['texto']
-        tipo_frag = fragmento['tipo_accion']
-        pos = fragmento['posicion']
-        
-        print(f"\n📌 Fragmento {pos} [{tipo_frag}]:")
-        
-
-        # 🔥 MEJORA 1: Detección manual de hora ANTES de usar extractor
-        hora_manual = None
-        fecha_manual = None
-        
-        if tipo_frag == 'alarma':
-            # Buscar hora específica de alarma
-            patron_hora_alarma = r'(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
-            match_hora = re.search(patron_hora_alarma, texto_frag.lower())
+    if 'alarma' in texto_lower:
+        try:
+            # Patrón: "alarma a las 2 de la tarde"
+            # Usamos el 're' global
+            patron_alarma = r'alarma.*?(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
+            match_alarma = re.search(patron_alarma, texto_lower)
             
-            if match_hora:
-                hora_num = int(match_hora.group(1))
-                periodo = match_hora.group(2)
+            if match_alarma:
+                hora_num = int(match_alarma.group(1))
+                periodo = match_alarma.group(2)
                 
                 if periodo == 'tarde' and hora_num < 12:
                     hora_num += 12
                 elif periodo == 'noche' and hora_num < 12:
                     hora_num += 12
                 
-                hora_manual = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
-                print(f"   🕐 Hora alarma manual: {hora_manual}")
-        
-        # 🔥 MEJORA 2: Extraer fecha del contexto base si el fragmento no tiene
-        if fragmento.get('contexto_base'):
-            try:
-                fh_contexto = extractor.extraer_fecha_hora(
-                    fragmento['contexto_base'],
-                    datetime.now(pytz.timezone('America/Lima'))
-                )
-                if fh_contexto and fh_contexto.get('fecha'):
-                    fecha_manual = fh_contexto['fecha']
-                    print(f"   📅 Fecha del contexto: {fecha_manual}")
-            except:
-                pass
-        
-        # 🔥 MEJORA 3: Intentar extracción normal
-        try:
-            fh = extractor.extraer_fecha_hora(
-                texto_frag,
-                datetime.now(pytz.timezone('America/Lima'))
-            )
+                hora_alarma = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                print(f"⏰ Hora de alarma detectada: {hora_alarma} ({periodo})")
             
-            if fh and fh.get('fecha'):
-                print(f"   📅 Fecha fragmento: {fh['fecha']}")
-                print(f"   🕐 Hora fragmento: {fh.get('hora', 'No especificada')}")
+            # Usar la fecha del evento principal para la alarma
+            if hora_alarma and fecha_hora and fecha_hora.get('fecha'):
+                fecha_alarma = fecha_hora['fecha']
+                print(f"📅 Fecha de alarma: {fecha_alarma}")
                 
-                # Usar fecha del fragmento o del contexto
-                fecha_final = fh['fecha'] if fh.get('fecha') else fecha_manual
-                hora_final = hora_manual if hora_manual else fh.get('hora')
-                
-                if fecha_final:
-                    # Crear objeto completo
-                    fh_final = {
-                        'fecha': fecha_final,
-                        'hora': hora_final,
-                        'timestamp': None
-                    }
-                    
-                    # Asignar según tipo
-                    if tipo_frag == 'alarma':
-                        fecha_hora_alarma = fh_final
-                        print(f"   ⏰ Asignada a ALARMA: {fecha_final} {hora_final}")
-                    
-                    elif tipo_frag in ['calendario', 'meet', 'general']:
-                        if not fecha_hora_calendario or fragmento['es_principal']:
-                            fecha_hora_calendario = fh_final
-                            print(f"   📆 Asignada a CALENDARIO: {fecha_final} {hora_final}")
-            
-            # Si no hay fecha en el fragmento pero hay hora manual y fecha del contexto
-            elif hora_manual and fecha_manual:
-                fh_final = {
-                    'fecha': fecha_manual,
-                    'hora': hora_manual,
-                    'timestamp': None
-                }
-                fecha_hora_alarma = fh_final
-                print(f"   ⏰ Alarma construida manualmente: {fecha_manual} {hora_manual}")
-        
         except Exception as e:
-            print(f"   ⚠️ Error extrayendo fecha: {e}")
-            
-            # Fallback: si tenemos datos manuales, usarlos
-            if hora_manual and fecha_manual:
-                fecha_hora_alarma = {
-                    'fecha': fecha_manual,
-                    'hora': hora_manual,
-                    'timestamp': None
-                }
-                print(f"   ⏰ Usando datos manuales de fallback")
-        
-        # --------------------------------------------------------
-        # B. EXTRAER UBICACIÓN (solo una vez)
-        # --------------------------------------------------------
-        if not ubicacion_final:
-            try:
-                ubi = extractor.extraer_ubicacion(texto_frag)
-                if ubi and ubi.get('direccion'):
-                    ubicacion_final = ubi
-                    print(f"   📍 Ubicación: {ubi['direccion']}")
-            except:
-                pass
-        
-        # --------------------------------------------------------
-        # C. EXTRAER PERSONAS (solo una vez)
-        # --------------------------------------------------------
-        if not personas_final:
-            try:
-                pers = extractor.extraer_personas(texto_frag)
-                if pers:
-                    personas_final = pers
-                    print(f"   👤 Personas: {len(pers)}")
-            except:
-                pass
-        
-        # --------------------------------------------------------
-        # D. REGISTRAR ACCIÓN
-        # --------------------------------------------------------
-        accion_mapeo = {
-            'alarma': 'poner_alarma',
-            'calendario': 'agendar_calendario',
-            'meet': 'crear_meet',
-            'mapa': 'ver_ubicacion',
-            'llamada': 'llamar',
-            'whatsapp': 'whatsapp',
-            'email': 'email',
-            'pago': 'abrir_yape'
-        }
-        
-        accion_agregar = accion_mapeo.get(tipo_frag)
-        if accion_agregar and accion_agregar not in acciones_detectadas:
-            acciones_detectadas.append(accion_agregar)
-            print(f"   ✅ Acción agregada: {accion_agregar}")
+            print(f"⚠️ Error intentando extraer hora alarma: {e}")
+    # ========================================================
+    # 3. EXTRAER UBICACIÓN
+    # ========================================================
+    ubicacion = extractor.extraer_ubicacion(texto_para_procesar)
     
     # ========================================================
-    # 4. CREAR TIMESTAMPS FINALES
+    # 4. EXTRAER PERSONAS
     # ========================================================
+    personas = extractor.extraer_personas(texto_para_procesar)
     
-    # Timestamp para calendario/meet
-    if fecha_hora_calendario:
+    # ========================================================
+    # 5. DETECCIÓN DE ACCIONES (Lógica sin cambios)
+    # ========================================================
+    acciones_sugeridas = []
+    tipo_accion_principal = 'tarea_general'
+    
+    # A. ALARMA
+    if any(palabra in texto_lower for palabra in ['alarma', 'despertador', 'recordatorio', 'avísame']):
+        acciones_sugeridas.append('poner_alarma')
+        if 'alarma' in texto_lower: tipo_accion_principal = 'alarma'
+        print("🔔 ✅ Acción detectada: ALARMA")
+    
+    # B. CALENDARIO
+    if any(palabra in texto_lower for palabra in ['agendar', 'calendario', 'cita', 'reunión', 'evento', 'entrevista']):
+        acciones_sugeridas.append('agendar_calendario')
+        if tipo_accion_principal == 'tarea_general': tipo_accion_principal = 'agendar_calendario'
+        print("📅 ✅ Acción detectada: CALENDARIO")
+    
+    # C. GOOGLE MEET
+    if any(palabra in texto_lower for palabra in ['meet', 'videollamada', 'zoom', 'teams', 'link', 'transmitir']):
+        acciones_sugeridas.append('crear_meet')
+        print("🎥 ✅ Acción detectada: MEET")
+    
+    # D. UBICACIÓN
+    if ubicacion and ubicacion.get('direccion'):
+        # Filtro simple de falsos positivos
+        if 'instrucción' not in ubicacion['direccion'].lower():
+            acciones_sugeridas.append('ver_ubicacion')
+            print("🗺️ ✅ Acción detectada: MAPA")
+    
+    # E. LLAMADA
+    if personas and any(p.get('telefono') for p in personas):
+        acciones_sugeridas.append('llamar')
+        print("📞 ✅ Acción detectada: LLAMADA")
+    
+    # F. WHATSAPP
+    if 'whatsapp' in texto_lower or 'wsp' in texto_lower:
+        acciones_sugeridas.append('whatsapp')
+        print("💬 ✅ Acción detectada: WHATSAPP")
+    
+    # ========================================================
+    # 6. CREAR TIMESTAMP
+    # ========================================================
+    timestamp_final = None
+    if fecha_hora:
         try:
-            f = fecha_hora_calendario['fecha']
-            h = fecha_hora_calendario.get('hora')
-            if f and h:
-                fecha_hora_calendario['timestamp'] = f"{f}T{h}"
-        except:
-            pass
-    
-    # Timestamp para alarma (separado)
-    timestamp_alarma = None
-    hora_alarma_str = None
-    
-    if fecha_hora_alarma:
-        try:
-            f_alarm = fecha_hora_alarma['fecha']
-            h_alarm = fecha_hora_alarma.get('hora')
-            if f_alarm and h_alarm:
-                timestamp_alarma = f"{f_alarm}T{h_alarm}"
-                hora_alarma_str = h_alarm.strftime('%H:%M:%S') if hasattr(h_alarm, 'strftime') else str(h_alarm)
-        except:
-            pass
-    
+            fecha_obj = fecha_hora.get('fecha')
+            hora_obj = fecha_hora.get('hora')
+            if fecha_obj and hora_obj:
+                ts_str = f"{fecha_obj}T{hora_obj}"
+                fecha_hora['timestamp'] = ts_str
+                print(f"🕐 Timestamp creado: {ts_str}")
+        except Exception:
+            pass # Ignoramos errores de timestamp aquí
     # ========================================================
-    # 5. VALIDACIONES Y FALLBACKS
+    # 7. RETORNO
     # ========================================================
-    
-    # Si no hay ubicación pero se detectó acción de mapa, buscar en texto completo
-    if 'ver_ubicacion' in acciones_detectadas and not ubicacion_final:
-        try:
-            ubicacion_final = extractor.extraer_ubicacion(texto_limpio)
-        except:
-            pass
-    
-    # Si ubicación es muy genérica, remover acción de mapa
-    if ubicacion_final and ubicacion_final.get('direccion'):
-        dir_lower = ubicacion_final['direccion'].lower()
-        if dir_lower in ['hospital', 'clínica', 'universidad'] or len(dir_lower) < 10:
-            if 'ver_ubicacion' in acciones_detectadas:
-                acciones_detectadas.remove('ver_ubicacion')
-                print("   ⚠️ Ubicación muy genérica, acción de mapa removida")
-    
-    # ========================================================
-    # 6. CONSTRUIR RESPUESTA FINAL
-    # ========================================================
-    
     contexto = {
-        'fecha_hora': fecha_hora_calendario,
-        'hora_alarma': hora_alarma_str,
-        'timestamp_alarma': timestamp_alarma,
-        'ubicacion': ubicacion_final,
-        'personas': personas_final,
-        'tipo_accion': 'multiple' if len(acciones_detectadas) > 1 else (acciones_detectadas[0] if acciones_detectadas else 'general'),
-        'acciones_sugeridas': acciones_detectadas,
-        'completitud': _calcular_completitud(fecha_hora_calendario, ubicacion_final, personas_final),
-        'link_meet': link_meet
+        'fecha_hora': fecha_hora,
+        'hora_alarma': hora_alarma.strftime('%H:%M:%S') if hora_alarma else None,
+        'ubicacion': ubicacion,
+        'personas': personas,
+        'tipo_accion': tipo_accion_principal,
+        'acciones_sugeridas': list(set(acciones_sugeridas)),
+        'completitud': _calcular_completitud(fecha_hora, ubicacion, personas)
     }
     
-    # ========================================================
-    # 7. LOG FINAL
-    # ========================================================
-    print(f"\n{'='*60}")
-    print(f"📋 RESUMEN FINAL:")
-    print(f"{'='*60}")
-    print(f"✅ Acciones: {acciones_detectadas}")
-    print(f"📅 Fecha calendario: {fecha_hora_calendario.get('timestamp') if fecha_hora_calendario else 'N/A'}")
-    print(f"⏰ Fecha alarma: {timestamp_alarma or 'N/A'}")
-    print(f"📍 Ubicación: {ubicacion_final.get('direccion') if ubicacion_final else 'N/A'}")
-    print(f"👥 Personas: {len(personas_final) if personas_final else 0}")
-    print(f"{'='*60}\n")
-    
+    print(f"📋 Contexto final: {acciones_sugeridas}")
     return contexto
+
 
 
 def _calcular_completitud(fecha_hora, ubicacion, personas):
