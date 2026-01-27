@@ -74,7 +74,7 @@ class ExtractorContexto:
         - "el viernes 10am" → próximo viernes a las 10:00
         - "15 de enero" → 2026-01-15 (sin hora)
         """
-        usar_dateutil = len(texto) < 150  # Aumentado de 50 a 150
+        usar_dateutil = len(texto) < 100  # Aumentado de 50 a 150
         texto_lower = texto.lower()
         resultado = {'fecha': None, 'hora': None, 'timestamp': None}
         
@@ -479,29 +479,18 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
     Divide texto largo en fragmentos semánticos (por acciones, no por longitud arbitraria).
     Detecta patrones coloquiales de CUALQUIER usuario.
     
-    Patrones detectados:
-    - Numeración: "1.", "2)", "primero", "segundo"
-    - Secuencia: "luego", "después", "también", "además"
-    - Separadores: "y", comas múltiples, puntos
-    - Verbos de acción: "agéndate", "recuérdame", "avísame"
-    
-    Returns:
-        Lista de fragmentos con metadata: {'texto': str, 'tipo_accion': str, 'posicion': int}
+    VERSIÓN CORREGIDA: Fragmentos más pequeños y sin contexto base redundante.
     """
     
-    # ========================================================
-    # 1. DETECCIÓN DE MÚLTIPLES TAREAS (Patrones Universales)
-    # ========================================================
-    
-    # Patrones de numeración (muy variados)
+    # Patrones de numeración
     patrones_numeracion = [
-        r'(?:^|\s)(\d+)[.)\-:]\s*',  # "1.", "2)", "3-", "4:"
+        r'(?:^|\s)(\d+)[.)\-:]\s*',
         r'(?:primero|segundo|tercero|cuarto|quinto|sexto)[,\s]',
         r'(?:primera|segunda|tercera|cuarta|quinta)[,\s]',
         r'(?:1ro|2do|3ro|4to|5to)[,\s]',
     ]
     
-    # Patrones de secuencia temporal
+    # Patrones de secuencia
     patrones_secuencia = [
         r'(?:luego|después|entonces|posteriormente)[,\s]',
         r'(?:también|además|aparte)[,\s]',
@@ -509,7 +498,7 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
         r'(?:y\s+(?:también|además|luego|después))[,\s]',
     ]
     
-    # Patrones de verbos de acción (comandos)
+    # Patrones de acción
     patrones_accion = [
         r'(?:recuérda|avísa|agend|program|cre|pon)[a-z]*me\s',
         r'(?:quiero|necesito|tengo que)\s',
@@ -517,10 +506,6 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
     ]
     
     texto_lower = texto.lower()
-    
-    # ========================================================
-    # 2. VERIFICAR SI HAY MÚLTIPLES TAREAS
-    # ========================================================
     
     # Contar indicadores
     cant_numeracion = sum(1 for p in patrones_numeracion if re.search(p, texto_lower, re.IGNORECASE))
@@ -536,7 +521,6 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
     print(f"   {'✅ MÚLTIPLES TAREAS detectadas' if es_multiple else '📌 Tarea única'}")
     
     if not es_multiple:
-        # Es una sola tarea
         return [{
             'texto': texto,
             'tipo_accion': _detectar_tipo_accion_rapida(texto),
@@ -545,58 +529,89 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
         }]
     
     # ========================================================
-    # 3. FRAGMENTACIÓN INTELIGENTE
+    # FRAGMENTACIÓN MEJORADA
     # ========================================================
     
     fragmentos = []
     
-    # Combinar todos los patrones de división
-    patron_completo = '|'.join(patrones_numeracion + patrones_secuencia)
-    
-    # Dividir el texto
-    partes = re.split(f'({patron_completo})', texto, flags=re.IGNORECASE)
-    
-    # Extraer contexto general (primera parte antes del primer indicador)
+    # 1. Extraer contexto base (primera oración antes de las tareas)
     contexto_base = ""
-    texto_procesado = texto
     
-    # Buscar el primer match de los patrones
-    primer_match = re.search(patron_completo, texto, re.IGNORECASE)
+    # Buscar el primer indicador de tarea
+    primer_match = None
+    for patron in patrones_numeracion + patrones_secuencia:
+        match = re.search(patron, texto, re.IGNORECASE)
+        if match and (not primer_match or match.start() < primer_match.start()):
+            primer_match = match
+    
     if primer_match:
-        contexto_base = texto[:primer_match.start()].strip()
-        texto_procesado = texto[primer_match.start():]
+        contexto_previo = texto[:primer_match.start()].strip()
+        # Extraer solo información de fecha/lugar del contexto (primera oración)
+        oraciones_contexto = contexto_previo.split('.')
+        if oraciones_contexto:
+            contexto_base = oraciones_contexto[0].strip()
+            # Limitar contexto a 100 caracteres
+            if len(contexto_base) > 100:
+                # Buscar hasta la primera coma después de fecha
+                partes = contexto_base.split(',')
+                contexto_base = ','.join(partes[:2])  # Solo las primeras 2 partes
     
-    # Dividir por los patrones
-    segmentos = re.split(patron_completo, texto_procesado, flags=re.IGNORECASE)
-    segmentos = [s.strip() for s in segmentos if s and len(s.strip()) > 5]
+    # 2. Dividir texto en segmentos por los indicadores
+    patron_division = '|'.join(patrones_numeracion + patrones_secuencia)
     
-    # ========================================================
-    # 4. CONSTRUIR FRAGMENTOS CON CONTEXTO
-    # ========================================================
+    # Usar finditer para mantener el texto original
+    matches = list(re.finditer(f'({patron_division})', texto, re.IGNORECASE))
     
+    if not matches:
+        # Si no hay matches, devolver como tarea única
+        return [{
+            'texto': texto,
+            'tipo_accion': _detectar_tipo_accion_rapida(texto),
+            'posicion': 1,
+            'es_principal': True
+        }]
+    
+    # 3. Construir fragmentos entre cada match
     posicion = 1
-    for segmento in segmentos:
-        if len(segmento) < 10:  # Ignorar muy cortos
+    for i, match in enumerate(matches):
+        inicio = match.end()  # Después del indicador
+        
+        # Buscar el final (siguiente indicador o fin del texto)
+        if i + 1 < len(matches):
+            fin = matches[i + 1].start()
+        else:
+            fin = len(texto)
+        
+        fragmento_texto = texto[inicio:fin].strip()
+        
+        # Filtrar fragmentos muy cortos
+        if len(fragmento_texto) < 10:
             continue
         
-        # Combinar con contexto base para dar información completa
-        texto_completo = f"{contexto_base} {segmento}".strip()
+        # 🔥 CRÍTICO: Combinar SOLO con contexto base reducido (no todo el texto)
+        if contexto_base and posicion == 1:
+            # Solo el primer fragmento lleva contexto de fecha/lugar
+            texto_completo = f"{contexto_base}. {fragmento_texto}"
+        else:
+            # Fragmentos subsecuentes son independientes
+            texto_completo = fragmento_texto
         
-        # Detectar tipo de acción de este fragmento
-        tipo = _detectar_tipo_accion_rapida(segmento)
+        tipo = _detectar_tipo_accion_rapida(fragmento_texto)
         
         fragmentos.append({
             'texto': texto_completo,
-            'texto_original': segmento,
+            'texto_original': fragmento_texto,
             'tipo_accion': tipo,
             'posicion': posicion,
             'es_principal': posicion == 1
         })
         
+        print(f"   {posicion}. [{tipo}] {fragmento_texto[:60]}...")
+        
         posicion += 1
     
-    # Si no se pudo fragmentar bien, devolver el texto completo
     if not fragmentos:
+        # Fallback: devolver texto completo
         return [{
             'texto': texto,
             'tipo_accion': _detectar_tipo_accion_rapida(texto),
@@ -604,12 +619,44 @@ def fragmentar_texto_inteligente(texto: str) -> List[Dict]:
             'es_principal': True
         }]
     
-    print(f"\n✂️ Texto fragmentado en {len(fragmentos)} partes:")
-    for f in fragmentos:
-        print(f"   {f['posicion']}. [{f['tipo_accion']}] {f['texto_original'][:60]}...")
+    print(f"\n✂️ Texto fragmentado en {len(fragmentos)} partes")
     
     return fragmentos
 
+
+def _detectar_tipo_accion_rapida(texto: str) -> str:
+    """
+    Detección rápida de tipo de acción sin IA.
+    VERSIÓN MEJORADA: Más patrones coloquiales.
+    """
+    texto_lower = texto.lower()
+    
+    # Prioridad de detección (más específico primero)
+    if any(p in texto_lower for p in ['alarma', 'despierta', 'avisa', 'recordatorio a las', 'despertador', 'avísame a las']):
+        return 'alarma'
+    
+    if any(p in texto_lower for p in ['meet', 'zoom', 'teams', 'videollamada', 'video llamada', 'enlace', 'link de', 'crear el enlace', 'google meet']):
+        return 'meet'
+    
+    if any(p in texto_lower for p in ['calendario', 'agenda', 'cita', 'reunión', 'entrevista', 'aparta', 'bloquea', 'aparta ese espacio']):
+        return 'calendario'
+    
+    if any(p in texto_lower for p in ['mapa', 'ubicación', 'dirección', 'donde esta', 'como llego', 'dame el mapa', 'ubicacion exacta']):
+        return 'mapa'
+    
+    if any(p in texto_lower for p in ['llama', 'teléfono', 'contacta por tel', 'marca al']):
+        return 'llamada'
+    
+    if any(p in texto_lower for p in ['whatsapp', 'wsp', 'mensaje', 'escribe por']):
+        return 'whatsapp'
+    
+    if any(p in texto_lower for p in ['yape', 'paga', 'transfi', 'deposita']):
+        return 'pago'
+    
+    if any(p in texto_lower for p in ['correo', 'email', 'mail', 'envía un correo']):
+        return 'email'
+    
+    return 'general'
 
 def _detectar_tipo_accion_rapida(texto: str) -> str:
     """
@@ -706,6 +753,23 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
         
         print(f"\n📌 Fragmento {pos} [{tipo_frag}]:")
         
+
+        if tipo_frag == 'alarma':
+            # Buscar patrón específico de alarma
+            patron_hora_alarma = r'(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)'
+            match_hora = re.search(patron_hora_alarma, texto_frag.lower())
+            
+            if match_hora:
+                hora_num = int(match_hora.group(1))
+                periodo = match_hora.group(2)
+                
+                if periodo == 'tarde' and hora_num < 12:
+                    hora_num += 12
+                elif periodo == 'noche' and hora_num < 12:
+                    hora_num += 12
+                
+                hora_manual = datetime.strptime(f"{hora_num}:00", "%H:%M").time()
+                print(f"   🕐 Hora alarma detectada manualmente: {hora_manual}")
         # --------------------------------------------------------
         # A. EXTRAER FECHA/HORA DE ESTE FRAGMENTO
         # --------------------------------------------------------
