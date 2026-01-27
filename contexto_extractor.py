@@ -139,12 +139,17 @@ class ExtractorContexto:
                     continue
 
         # Si no se encontró con regex, intentar con dateutil
+        # Si no se encontró con regex, intentar con dateutil SOLO si el texto es corto
         if not resultado['fecha']:
             try:
-                fecha_parseada = date_parser.parse(texto, fuzzy=True, default=ref)
-                if fecha_parseada.date() != ref.date():
-                    resultado['fecha'] = fecha_parseada.date()
-                    print(f"✅ Fecha detectada (dateutil): {resultado['fecha']}")
+                # 🔥 CORRECCIÓN: Solo usar dateutil si el texto es menor a 50 caracteres
+                if len(texto) < 50:
+                    fecha_parseada = date_parser.parse(texto, fuzzy=True, default=ref)
+                    if fecha_parseada.date() != ref.date():
+                        resultado['fecha'] = fecha_parseada.date()
+                        print(f"✅ Fecha detectada (dateutil): {resultado['fecha']}")
+                else:
+                    print(f"⚠️ Texto muy largo para dateutil ({len(texto)} chars), usando solo regex")
             except Exception as e:
                 print(f"⚠️ Error con dateutil: {e}")
         
@@ -476,7 +481,7 @@ class ExtractorContexto:
 def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     """
     Extrae automáticamente fecha, hora, ubicación y MÚLTIPLES acciones.
-    VERSIÓN FINAL: Usa las librerías globales y limpia el texto correctamente.
+    VERSIÓN CORREGIDA: Filtra el texto antes de procesarlo.
     """
     extractor = ExtractorContexto()
     
@@ -484,7 +489,7 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     texto_sucio = f"{titulo} {descripcion}"
     
     # ========================================================
-    # 🧹 LIMPIEZA DE TEXTO
+    # 🧹 LIMPIEZA DE TEXTO MEJORADA
     # ========================================================
     texto_para_procesar = texto_sucio
     
@@ -498,12 +503,19 @@ def enriquecer_alerta_con_contexto(titulo: str, descripcion: str) -> Dict:
     # Si detectamos "Procesando..." o "[Instrucción]" pero sin tag de mensaje claro
     elif "Procesando..." in texto_sucio or "[Instrucción]" in texto_sucio:
         try:
-            # Usamos el 're' global que ya importaste al inicio del archivo
             texto_para_procesar = re.sub(r'^.*?(?=\[Mensaje\])', '', texto_sucio, flags=re.DOTALL)
         except Exception:
-            # Si falla el regex, usamos el texto original como fallback
             texto_para_procesar = texto_sucio
 
+    # 🔥 NUEVA CORRECCIÓN: Crear versión corta SOLO para el print
+    if len(texto_para_procesar) > 100:
+        texto_para_mostrar = texto_para_procesar[:100] + "..."
+    else:
+        texto_para_mostrar = texto_para_procesar
+    
+    print(f"🔍 Analizando contexto (Limpio): {texto_para_mostrar}")
+    
+    # 🔥 IMPORTANTE: Convertir a minúsculas DESPUÉS de limpiar
     texto_lower = texto_para_procesar.lower()
     
     print(f"🔍 Analizando contexto (Limpio): {texto_para_procesar[:100]}...")
