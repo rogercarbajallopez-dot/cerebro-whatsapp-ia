@@ -707,16 +707,16 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         
         CONTEXTO TEMPORAL:
         - HOY ES: {fecha_actual}
-        
+        OBJETIVO: Identificar CADA tarea o evento distinto en el mensaje.
         MENSAJE DEL USUARIO:
         "{mensaje}"
         
-        INSTRUCCIONES CRÍTICAS (LEE COMPLETO):
-        
-        **IMPORTANTE**: Debes responder SOLO con un objeto JSON válido. NO devuelvas arrays, listas, ni texto adicional.
-        
-        Tu respuesta debe ser EXACTAMENTE un objeto JSON con esta estructura:
-        
+        INSTRUCCIONES:
+        Responde con una LISTA JSON (Array) de objetos.
+        Ejemplo: [{{ "titulo": "Alarma", ... }}, {{ "titulo": "Reunión", ... }}]
+
+        ESTRUCTURA OBLIGATORIA DE CADA TAREA:
+
         {{
             "titulo": "Texto breve del asunto",
             "descripcion": "Descripción detallada con fecha y hora",
@@ -724,6 +724,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "etiqueta": "NEGOCIO",
             "fecha_limite": "2026-02-05T17:00:00",
             "link_meet": "https://meet.google.com/new",
+            "tipo_accion": "poner_alarma" o "agendar_calendario" o "crear_meet",
             "mensaje_usuario": "Confirmación"
         }}
         
@@ -762,11 +763,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         
         RESPONDE SOLO CON EL JSON. SIN TEXTO ADICIONAL. SIN EXPLICACIONES.
         """
-    # Variable para almacenar los datos finales a guardar
-    datos_finales = {}
-
-    # --- PASO 1: INTENTO DE INTELIGENCIA ARTIFICIAL ---
-    
+    resultados_texto = [] # Para acumular los mensajes de éxito ("✅ Tarea 1", "✅ Tarea 2")
     try:
         if not gemini_client:
             raise Exception("Cliente Gemini no disponible")
@@ -774,246 +771,106 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         resp = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
 
-        # 🔥 CORRECCIÓN: Validar la respuesta antes de parsear
-        texto_respuesta = resp.text.strip()
-        print(f"🤖 Respuesta de Gemini (primeros 200 chars): {texto_respuesta[:200]}")
+        texto_limpio = resp.text.replace("```json", "").replace("```", "").strip()
+        data_raw = json.loads(texto_limpio)
         
-        # Limpiar el texto
-        texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
+        # Validación: Asegurar que sea lista
+        lista_tareas = data_raw if isinstance(data_raw, list) else [data_raw]
         
-        # Intentar parsear
-        data = json.loads(texto_limpio)
-        
-        # 🔥 VALIDACIÓN CRÍTICA: Verificar que sea un diccionario
-        if isinstance(data, list):
-            print(f"⚠️ Gemini devolvió una LISTA en lugar de un objeto. Contenido: {data}")
-            raise Exception("Respuesta es una lista, no un objeto JSON válido")
-        
-        if not isinstance(data, dict):
-            print(f"⚠️ Gemini devolvió tipo {type(data)}: {data}")
-            raise Exception(f"Respuesta no es un objeto JSON válido: {type(data)}")
-        
-        # 🔥 VALIDACIÓN: Verificar que tenga los campos mínimos
-        if 'titulo' not in data or 'descripcion' not in data:
-            print(f"⚠️ JSON sin campos requeridos. Data: {data}")
-            raise Exception("JSON no tiene 'titulo' o 'descripcion'")
-        
-        # 🔥 ACTUALIZAR contexto con el título real de la IA
-        contexto = enriquecer_alerta_con_contexto(
-            titulo=data.get('titulo', 'Tarea Nueva'),
-            descripcion=data.get('descripcion', mensaje)
-        )
+        print(f"🤖 IA detectó {len(lista_tareas)} tareas.")
 
-        # 🔥 AGREGAR EL LINK AL CONTEXTO
-        if data.get('link_meet'):
-            contexto['link_meet'] = data['link_meet']
-
-
-        # 🔥 CORRECCIÓN: Manejar diferentes formatos de fecha
-        fecha_limite_raw = data.get('fecha_limite')
-        fecha_limite_final = None
-
-        if fecha_limite_raw:
-            try:
-                if isinstance(fecha_limite_raw, str):
-                    # Ya es string, validar formato ISO
-                    fecha_limite_final = fecha_limite_raw
-                elif hasattr(fecha_limite_raw, 'isoformat'):
-                    # Es objeto datetime/date, convertir
-                    fecha_limite_final = fecha_limite_raw.isoformat()
-                elif isinstance(fecha_limite_raw, (int, float)):
-                    # Es timestamp, convertir
-                    fecha_limite_final = datetime.fromtimestamp(fecha_limite_raw).isoformat()
-                else:
-                    # Último recurso
-                    fecha_limite_final = str(fecha_limite_raw)
-            except Exception as e:
-                print(f"⚠️ Error procesando fecha_limite: {e}")
-                fecha_limite_final = None
-
-
-        # 🔥 CORRECCIÓN: Actualizar el timestamp en el contexto
-        # 🔥 CORRECCIÓN: Actualizar el timestamp en el contexto
-        if fecha_limite_final and contexto.get('fecha_hora'):
-            contexto['fecha_hora']['timestamp'] = fecha_limite_final
-
-        # 🔥 CORRECCIÓN CRÍTICA: Si hay hora de alarma específica, crear timestamp adicional
-        if contexto.get('hora_alarma') and contexto.get('fecha_hora', {}).get('fecha'):
-            try:
-                fecha_base = contexto['fecha_hora']['fecha']
-                hora_alarma = contexto['hora_alarma']
-                timestamp_alarma = f"{fecha_base}T{hora_alarma}"
-                contexto['timestamp_alarma'] = timestamp_alarma
-                print(f"⏰ Timestamp alarma creado: {timestamp_alarma}")
-            except Exception as e:
-                print(f"⚠️ Error creando timestamp alarma: {e}")
-
-        metadata_limpio = _limpiar_metadata_para_json(contexto)
-
-        datos_finales = {
-            "usuario_id": usuario_id,
-            "titulo": data.get('titulo', 'Tarea Nueva'),
-            "descripcion": data.get('descripcion', mensaje),
-            "prioridad": data.get('prioridad', 'MEDIA'),
-            "tipo": "manual",
-            "estado": "pendiente",
-            "etiqueta": data.get('etiqueta', 'OTROS'),
-            "fecha_limite": fecha_limite_final,
-            "metadata": metadata_limpio
-        }
-
-    except Exception as e_ia:
-        print(f"⚠️ La IA no pudo estructurar el JSON: {e_ia}. Usando modo manual.")
-        # --- PASO 2: FALLBACK (Plan B si la IA falla) ---
-        # Si la IA falla, no nos detenemos. Preparamos los datos "en crudo".
-        datos_finales = {
-            "usuario_id": usuario_id,
-            "titulo": "Recordatorio Rápido", # Título genérico
-            "descripcion": mensaje,          # Guardamos el texto original tal cual
-            "prioridad": "MEDIA",
-            "tipo": "manual",
-            "estado": "pendiente",
-            "etiqueta": "OTROS",
-            "fecha_limite": None,
-            "metadata": contexto  # 🔥 AQUÍ SE GUARDA TODO EL CONTEXTO
-        }
-
-    # --- PASO 3: GUARDADO EN BASE DE DATOS (El momento de la verdad) ---
-    try:
-        # Intentamos insertar los datos
-        res = supabase.table('alertas').insert(datos_finales).execute()
-        # 🔥 ACTUALIZAR: Si se creó un evento en Google Calendar con Meet, actualizar el link
-        if res.data and contexto.get('acciones_sugeridas') and 'crear_meet' in contexto['acciones_sugeridas']:
-            try:
-                # Intentar obtener el link real del Meet que se creó
-                alerta_id = res.data[0]['id']
-                
-                # Esperar un momento para que se ejecute la creación del Meet
-                import asyncio
-                await asyncio.sleep(2)
-                
-                # Consultar la alerta actualizada
-                alerta_actualizada = supabase.table('alertas').select('metadata').eq('id', alerta_id).execute()
-                
-                if alerta_actualizada.data and alerta_actualizada.data[0].get('metadata', {}).get('link_meet'):
-                    link_meet_real = alerta_actualizada.data[0]['metadata']['link_meet']
-                    if link_meet_real != 'https://meet.google.com/new':
-                        contexto['link_meet'] = link_meet_real
-                        print(f"✅ Link Meet actualizado a: {link_meet_real}")
-            except Exception as e:
-                print(f"⚠️ No se pudo actualizar link Meet: {e}")
-
-
-        # 🔥🔥 INICIO NOTIFICACIONES (Bloque Nuevo) 🔥🔥
-        # 🔥🔥 ENVIAR UNA SOLA NOTIFICACIÓN CON TODAS LAS ACCIONES
-        try:
-            user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+        # =================================================================
+        # BUCLE PRINCIPAL (Aquí ocurre la magia Multi-Tarea)
+        # =================================================================
+        for i, tarea in enumerate(lista_tareas):
             
-            if user_data.data and user_data.data[0].get('fcm_token'):
-                token = user_data.data[0]['fcm_token']
-                
-                # Configurar Emoji según prioridad
-                prio = datos_finales.get('prioridad', 'MEDIA')
-                emoji = "🔴" if prio == 'ALTA' else ("🟡" if prio == 'MEDIA' else "🟢")
-                
-                # 🔥 OBTENER TODAS LAS ACCIONES DETECTADAS
-                acciones_detectadas = contexto.get('acciones_sugeridas', [])
-                
-                print(f"🎯 Preparando notificación con {len(acciones_detectadas)} acciones")
-                
-                # Crear descripción de las acciones
-                acciones_texto = []
-                if 'poner_alarma' in acciones_detectadas:
-                    acciones_texto.append("⏰ Alarma")
-                if 'agendar_calendario' in acciones_detectadas:
-                    acciones_texto.append("📅 Calendario")
-                if 'crear_meet' in acciones_detectadas:
-                    acciones_texto.append("🎥 Meet")
-                if 'ver_ubicacion' in acciones_detectadas:
-                    acciones_texto.append("🗺️ Mapa")
-                
-                cuerpo_notificacion = f"Se ejecutarán {len(acciones_detectadas)} acciones:\n" + ", ".join(acciones_texto)
-                
-                # 🔥 ENVIAR UNA SOLA NOTIFICACIÓN
-                enviar_push(
-                    token=token,
-                    titulo=f"{emoji} Nueva Tarea: {datos_finales['titulo']}",
-                    cuerpo=cuerpo_notificacion,
-                    data_extra={
-                        "tipo": "TAREA_EJECUTABLE",
-                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
-                        "ejecutar_automatico": "true",
-                        "titulo": datos_finales['titulo'],
-                        "descripcion": datos_finales['descripcion'],
-                        "metadata": json.dumps(contexto),
-                        "acciones_totales": json.dumps(acciones_detectadas),  # 🔥 LISTA COMPLETA
-                        "total_acciones": str(len(acciones_detectadas)),
-                    }
-                )
-                
-                print(f"✅ Notificación enviada con {len(acciones_detectadas)} acciones para ejecutar")
-                
-        except Exception as e_push:
-            print(f"⚠️ Error enviando notificación: {e_push}")
-        # 🔥🔥 FIN NOTIFICACIONES
-        
-        # ÉXITO TOTAL
-        origen = "🤖 IA+Contexto" if datos_finales['titulo'] != "Recordatorio Rápido" else "📝 Texto"
-        acciones_info = ""
-        if contexto.get('acciones_sugeridas'):
-            acciones_info = f"\n🔘 Acciones disponibles: {', '.join(contexto['acciones_sugeridas'])}"
-        
-        # 🔥🔥 NUEVO: AUTO-EJECUTAR ACCIONES AUTOMÁTICAMENTE 🔥🔥
-        try:
-            # 1. Obtener token del usuario
-            user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            # A. Clonamos contexto para no mezclar datos entre tareas
+            contexto_tarea = contexto_global.copy()
             
-            if user_data.data and user_data.data[0].get('fcm_token'):
-                token_fcm = user_data.data[0]['fcm_token']
-                tipo_accion = contexto.get('tipo_accion', 'tarea_general')
-                
-                print(f"✅ Preparando notificación ejecutable: {tipo_accion}")
-                # 🔥 DEBUG: Verificar qué estamos enviando
-                print(f"🐛 DEBUG - Datos de notificación:")
-                print(f"   tipo_accion: {tipo_accion}")
-                print(f"   metadata keys: {list(contexto.keys())}")
-                print(f"   fecha_hora: {contexto.get('fecha_hora')}")
-                print(f"   acciones_sugeridas: {contexto.get('acciones_sugeridas')}")
-                # 2. Enviar notificación EJECUTABLE
-                enviar_push(
-                    token=token_fcm,
-                    titulo=f"⚡ Nueva Tarea: {datos_finales['titulo']}",
-                    cuerpo=datos_finales['descripcion'],
-                    data_extra={
-                        "tipo": "TAREA_EJECUTABLE",
-                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
-                        "accion_principal": tipo_accion,
-                        "ejecutar_automatico": "true",
-                        "titulo": datos_finales['titulo'],
-                        "descripcion": datos_finales['descripcion'],
-                        "metadata": json.dumps(contexto),
-                    }
-                )
-                
-        except Exception as e_push:
-            print(f"⚠️ Error enviando notificación: {e_push}")
+            # B. Actualizamos Timestamp y Hora Específica
+            if tarea.get('fecha_limite'):
+                contexto_tarea['fecha_hora'] = {'timestamp': tarea['fecha_limite']}
+                try:
+                    # Si es alarma, extraemos la hora exacta para el campo 'hora_alarma'
+                    dt = datetime.fromisoformat(tarea['fecha_limite'])
+                    if tarea.get('tipo_accion') == 'poner_alarma':
+                        contexto_tarea['hora_alarma'] = dt.strftime("%H:%M:%S")
+                except:
+                    pass
 
-        # AHORA SÍ hacer el return
+            # C. Configurar Botones (Acciones)
+            accion = tarea.get('tipo_accion', 'tarea_general')
+            contexto_tarea['acciones_sugeridas'] = [accion]
+            
+            if tarea.get('requiere_meet') or accion == 'crear_meet':
+                contexto_tarea['link_meet'] = "https://meet.google.com/new"
+                if 'crear_meet' not in contexto_tarea['acciones_sugeridas']:
+                    contexto_tarea['acciones_sugeridas'].append('crear_meet')
 
+            # D. Limpieza final de metadata
+            meta_limpia = _limpiar_metadata_para_json(contexto_tarea)
+
+            # E. Preparar datos para BD
+            datos_finales = {
+                "usuario_id": usuario_id,
+                "titulo": tarea.get('titulo', f'Tarea {i+1}'),
+                "descripcion": tarea.get('descripcion', mensaje),
+                "prioridad": tarea.get('prioridad', 'MEDIA'),
+                "tipo": "manual",
+                "estado": "pendiente",
+                "etiqueta": tarea.get('etiqueta', 'OTROS'),
+                "fecha_limite": tarea.get('fecha_limite'), # Corregido: con comillas
+                "metadata": meta_limpia
+            }
+
+            # F. GUARDADO EN BASE DE DATOS (DENTRO DEL BUCLE)
+            try:
+                res = supabase.table('alertas').insert(datos_finales).execute()
+                
+                # G. NOTIFICACIÓN PUSH (DENTRO DEL BUCLE)
+                if res.data:
+                    user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+                    if user_data.data and user_data.data[0].get('fcm_token'):
+                        token = user_data.data[0]['fcm_token']
+                        
+                        enviar_push(
+                            token=token,
+                            titulo=f"⚡ {datos_finales['titulo']}",
+                            cuerpo=datos_finales['descripcion'],
+                            data_extra={
+                                "tipo": "TAREA_EJECUTABLE",
+                                "alerta_id": str(res.data[0]['id']),
+                                "accion_principal": accion,
+                                "ejecutar_automatico": "true",
+                                "metadata": json.dumps(meta_limpia)
+                            }
+                        )
+                    
+                    resultados_texto.append(f"✅ {datos_finales['titulo']}")
+
+            except Exception as e_save:
+                print(f"⚠️ Error guardando tarea {i}: {e_save}")
+                resultados_texto.append(f"❌ Error: {datos_finales['titulo']}")
+
+        # =================================================================
+        # RETORNO FINAL
+        # =================================================================
         return {
-            "status": "tarea_creada", 
-            "respuesta": f"✅ Agendado ({origen}): {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
-            "metadata": contexto, # Devolver para que Flutter lo use
-            "link_meet": contexto.get('link_meet')   
+            "status": "tarea_creada",
+            "respuesta": "He procesado lo siguiente:\n" + "\n".join(resultados_texto),
+            "metadata": contexto_global,
+            "cantidad": len(lista_tareas)
         }
 
-    except Exception as e_bd:
-        print(f"🛑 Error BD: {e_bd}")
+    except Exception as e:
+        print(f"🛑 Error General: {e}")
+        return {
+            "status": "error",
+            "respuesta": "Hubo un error interno procesando las tareas."
+        }
         
         # 🔥 INTENTO DE AUTO-REPARACIÓN
         if "foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower():
