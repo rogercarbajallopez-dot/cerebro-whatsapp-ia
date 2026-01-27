@@ -160,6 +160,9 @@ class ExtractorContexto:
             # 🔥 PRIORIDAD 1: "X de la tarde/mañana/noche" (MÁS ESPECÍFICO)
             (r'(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)', 'contextual'),
             (r'a\s+las?\s+(\d{1,2})\s+de\s+la\s+(mañana|tarde|noche)', 'contextual'),
+            # 🔥 ESTA ES LA LÍNEA QUE FALTA EN TU CÓDIGO ACTUAL:
+            (r'(\d{1,2}):(\d{2})\s*(am|pm)', 'ampm_colon'), 
+
             
             # PRIORIDAD 2: Formato 24h (ej: "17:00")
             (r'(\d{1,2}):(\d{2})', '24h'),
