@@ -697,7 +697,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
     # 🔥 CORRECCIÓN: Extraer contexto PRIMERO
     extractor = ExtractorContexto()
-    contexto = enriquecer_alerta_con_contexto(
+    contexto_global = enriquecer_alerta_con_contexto(
         titulo="Procesando...",  # Temporal
         descripcion=mensaje
     )
