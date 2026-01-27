@@ -787,7 +787,29 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
         
         # Intentar parsear
-        data = json.loads(texto_limpio)
+        # 🔥 VALIDACIÓN CRÍTICA: Verificar que resp.text no sea None
+        if not resp or not resp.text:
+            print("⚠️ Gemini devolvió respuesta vacía")
+            raise Exception("Respuesta vacía de Gemini")
+
+        texto_respuesta = resp.text.strip()
+        print(f"🤖 Respuesta de Gemini (primeros 200 chars): {texto_respuesta[:200]}")
+
+        # Limpiar el texto
+        texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
+
+        # 🔥 VALIDACIÓN: Verificar que no esté vacío después de limpiar
+        if not texto_limpio:
+            print("⚠️ Texto limpio está vacío")
+            raise Exception("Texto limpio vacío")
+
+        # Intentar parsear
+        try:
+            data = json.loads(texto_limpio)
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Error JSON: {e}")
+            print(f"   Texto recibido: {texto_limpio[:500]}")
+            raise Exception(f"JSON inválido: {str(e)}")
         
         # 🔥 VALIDACIÓN CRÍTICA: Verificar que sea un diccionario
         if isinstance(data, list):
@@ -854,7 +876,21 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                 print(f"⚠️ Error creando timestamp alarma: {e}")
 
         metadata_limpio = _limpiar_metadata_para_json(contexto)
+        # 🔥 VALIDACIÓN: Verificar que data no sea None
+        if data is None:
+            print("❌ ERROR: data es None")
+            raise Exception("Data es None después de parsear JSON")
 
+        # 🔥 VALIDACIÓN: Verificar que sea un diccionario
+        if not isinstance(data, dict):
+            print(f"❌ ERROR: data no es dict, es {type(data)}: {data}")
+            raise Exception(f"Data no es diccionario: {type(data)}")
+
+        # 🔥 VALIDACIÓN: Verificar campos mínimos
+        if 'titulo' not in data and 'descripcion' not in data:
+            print(f"⚠️ JSON sin campos requeridos. Data: {data}")
+            raise Exception("JSON sin campos título/descripción")
+            
         datos_finales = {
             "usuario_id": usuario_id,
             "titulo": data.get('titulo', 'Tarea Nueva'),
