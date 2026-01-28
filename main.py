@@ -692,7 +692,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     # 1. Contexto Temporal (Igual que tu original)
     zona_horaria = pytz.timezone('America/Lima')
     ahora = datetime.now(zona_horaria)
-    fecha_actual_str = ahora.strftime("%Y-%m-%d %H:%M:%S (%A)")
+    fecha_actual = ahora.strftime("%Y-%m-%d %H:%M:%S (%A)")
     
     # 2. Pre-análisis (Igual que tu original)
     extractor = ExtractorContexto()
@@ -716,7 +716,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     # ---------------------------------------------------------
     prompt = f"""
         Actúa como un Asistente Ejecutivo Experto.
-        HOY ES: {fecha_actual_str}
+        HOY ES: {fecha_actual}
         FECHA BASE DEL TEXTO: {fecha_referencia}
         MENSAJE DEL USUARIO: "{mensaje}"
 
