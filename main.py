@@ -684,49 +684,57 @@ def _limpiar_metadata_para_json(metadata: Dict) -> Dict:
 
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
-    Crea una alerta directa CON ENRIQUECIMIENTO CONTEXTUAL.(Intención TAREA).
-    SOLUCIÓN ROBUSTA: 
-    1. Interpreta typos y fechas relativas.
-    2. Si falla el formato JSON, guarda en modo texto (Fallback).
-    3. Si falla la Base de Datos (ID incorrecto), avisa sin romper el sistema.
+    Versión 'PAQUETE MAESTRO': 
+    1. Detecta múltiples acciones con horas distintas (Alarma 2pm, Cita 5pm).
+    2. Guarda UNA sola tarea en la BD con todas las sub-acciones en metadata.
+    3. Envía UNA sola notificación con el resumen.
     """
-    # 1. Obtenemos la fecha exacta en Lima, Perú
+    # 1. Contexto Temporal (Igual que tu original)
     zona_horaria = pytz.timezone('America/Lima')
-    fecha_obj = datetime.now(zona_horaria)
-    fecha_actual = fecha_obj.strftime("%Y-%m-%d %H:%M:%S (%A)") # Ej: 2026-01-05 (Lunes)
-
-    # 🔥 CORRECCIÓN: Extraer contexto PRIMERO
+    ahora = datetime.now(zona_horaria)
+    fecha_actual_str = ahora.strftime("%Y-%m-%d %H:%M:%S (%A)")
+    
+    # 2. Pre-análisis (Igual que tu original)
     extractor = ExtractorContexto()
     contexto = enriquecer_alerta_con_contexto(
-        titulo="Procesando...",  # Temporal
+        titulo="Procesando...", 
         descripcion=mensaje
     )
+    
+    # Para tener una fecha base de respaldo si la IA falla
+    fecha_base = contexto.get('fecha_hora', {}).get('fecha', ahora.strftime("%Y-%m-%d"))
 
+    # ---------------------------------------------------------
+    # 3. PROMPT NUEVO: ESTRUCTURA DE LISTA DE ACCIONES
+    # ---------------------------------------------------------
     prompt = f"""
-        Actúa como asistente personal experto en análisis de tareas.
-        
-        CONTEXTO TEMPORAL:
-        - HOY ES: {fecha_actual}
-        OBJETIVO: Identificar CADA tarea o evento distinto en el mensaje.
-        MENSAJE DEL USUARIO:
-        "{mensaje}"
-        
+        Actúa como un Asistente Ejecutivo Experto.
+        HOY ES: {fecha_actual_str}
+        FECHA BASE DEL TEXTO: {fecha_base}
+        MENSAJE DEL USUARIO: "{mensaje}"
+
+        OBJETIVO: Desglosar el mensaje en una LISTA de acciones técnicas con sus fechas exactas.
+
         INSTRUCCIONES:
-        Responde con una LISTA JSON (Array) de objetos.
-        Ejemplo: [{{ "titulo": "Alarma", ... }}, {{ "titulo": "Reunión", ... }}]
-
-        ESTRUCTURA OBLIGATORIA DE CADA TAREA:
-
-        {{
-            "titulo": "Texto breve del asunto",
-            "descripcion": "Descripción detallada con fecha y hora",
-            "prioridad": "ALTA",
-            "etiqueta": "NEGOCIO",
-            "fecha_limite": "2026-02-05T17:00:00",
-            "link_meet": "https://meet.google.com/new",
-            "tipo_accion": "poner_alarma" o "agendar_calendario" o "crear_meet",
-            "mensaje_usuario": "Confirmación"
-        }}
+        1. Identifica todas las intenciones: Alarma, Calendario, Meet, Mapa, Llamada, WhatsApp.
+        2. Para CADA acción, calcula la "fecha_iso" exacta.
+           - Ejemplo: Si dice "Alarma a las 2pm" -> "2026-02-02T14:00:00"
+           - Ejemplo: Si dice "Reunión a las 5pm" -> "2026-02-02T17:00:00"
+        
+        REGLAS DE SALIDA (JSON):
+        Devuelve una LISTA JSON (Array) de objetos.
+        [
+            {{
+                "titulo": "Nombre corto de la sub-acción",
+                "descripcion": "Descripción detallada con fecha y hora",
+                "tipo_accion": "poner_alarma" | "agendar_calendario" | "crear_meet" | "ver_ubicacion",
+                "prioridad": "ALTA",
+                "etiqueta": "NEGOCIO",
+                "fecha_iso": "YYYY-MM-DDTHH:MM:SS" (OBLIGATORIO),
+                "mensaje_usuario": "Confirmación"
+                "dato_extra": "Link de meet, Dirección, o Teléfono"
+            }}
+        ]
         
         REGLAS OBLIGATORIAS:
         
@@ -755,191 +763,154 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         - MEDIA (importante pero no urgente)
         - BAJA (puede esperar)
         
-        6. **link_meet**: 
-        - Si menciona "meet", "zoom", "videollamada", "transmitir" → "https://meet.google.com/new"
-        - Si NO menciona → null
-        
+                
         7. **mensaje_usuario**: Confirmación breve (Ejemplo: "Agendado: Entrevista BCP el 5/02 a las 5 PM")
         
         RESPONDE SOLO CON EL JSON. SIN TEXTO ADICIONAL. SIN EXPLICACIONES.
-        """
+    """
+
     try:
         if not gemini_client:
-            raise Exception("Sin conexión a IA")
+            raise Exception("Cliente Gemini no disponible")
 
-        # Llamada a la IA
+        # Llamada a Gemini
         resp = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
 
+        # Limpieza y Parseo
         texto_limpio = resp.text.replace("```json", "").replace("```", "").strip()
         lista_acciones = json.loads(texto_limpio)
-        if isinstance(lista_acciones, dict): lista_acciones = [lista_acciones]
+        
+        # Asegurar que sea lista
+        if isinstance(lista_acciones, dict): 
+            lista_acciones = [lista_acciones]
 
         print(f"🤖 IA detectó {len(lista_acciones)} sub-acciones.")
 
-        # =================================================================
-        # 🧠 LÓGICA DE AGREGACIÓN (EL CARRITO DE COMPRAS)
-        # =================================================================
+        # ---------------------------------------------------------
+        # 4. LÓGICA DE AGREGACIÓN (EL "CARRITO" DE ACCIONES)
+        # ---------------------------------------------------------
         
-        # Variables para la Tarea Maestra
-        titulo_maestro = "Nueva Tarea"
-        descripcion_maestra = mensaje
-        fecha_limite_maestra = None
+        # Variables para la Tarea Maestra (La tarjeta única)
+        # Usamos el mensaje original como descripción para no perder detalle
+        titulo_maestro = "Nueva Tarea Inteligente"
         prioridad_maestra = "MEDIA"
+        fecha_limite_maestra = None 
         
-        # Lista donde guardaremos el detalle de cada botón
-        sub_acciones_guardadas = [] 
-        resumen_bonito = []
+        # Aquí guardaremos las acciones para que el Frontend dibuje los botones
+        acciones_para_metadata = [] 
+        resumen_texto_push = []
 
-        # Recorremos lo que trajo la IA para armar el paquete
         for item in lista_acciones:
             tipo = item.get('tipo_accion', 'general')
-            hora_iso = item.get('fecha_iso')
-            
-            # Formatear hora para que se vea bonita en la respuesta (ej: "14:00")
-            hora_legible = "Sin hora"
-            if hora_iso:
-                try:
-                    dt = datetime.fromisoformat(hora_iso)
-                    hora_legible = dt.strftime("%I:%M %p") # 02:00 PM
-                except:
-                    pass
+            fecha_iso = item.get('fecha_iso')
+            titulo_item = item.get('titulo', 'Acción')
+            dato_extra = item.get('dato_extra')
 
-            # 1. Definir el Título Maestro (Prioridad: Calendario > Alarma)
+            # Corrección de Fechas (Si la IA falló, usamos la base)
+            if not fecha_iso and fecha_base:
+                # Hora por defecto según tipo
+                hora_def = "14:00:00" if "alarma" in tipo else "09:00:00"
+                fecha_iso = f"{fecha_base}T{hora_def}"
+
+            # Definir Título Principal (El calendario manda sobre la alarma)
             if tipo == 'agendar_calendario':
-                titulo_maestro = item.get('titulo', titulo_maestro)
-                fecha_limite_maestra = hora_iso # La fecha de la tarea es la de la reunión
+                titulo_maestro = titulo_item
                 prioridad_maestra = "ALTA"
-            elif tipo == 'poner_alarma' and titulo_maestro == "Nueva Tarea":
-                titulo_maestro = item.get('titulo', "Alarma")
-                if not fecha_limite_maestra: fecha_limite_maestra = hora_iso
+                fecha_limite_maestra = fecha_iso
+            elif tipo == 'poner_alarma' and titulo_maestro == "Nueva Tarea Inteligente":
+                titulo_maestro = titulo_item
+                if not fecha_limite_maestra: fecha_limite_maestra = fecha_iso
 
-            # 2. Guardar la Sub-Acción con sus datos específicos
-            accion_struct = {
+            # Guardar la sub-acción limpia
+            acciones_para_metadata.append({
                 "tipo": tipo,
-                "titulo": item.get('titulo'),
-                "fecha_hora_especifica": hora_iso, # IMPORTANTE: Cada botón sabe su hora
-                "dato_extra": item.get('dato_extra')
-            }
-            sub_acciones_guardadas.append(accion_struct)
+                "titulo": titulo_item,
+                "fecha_hora_especifica": fecha_iso, # 🔥 CADA BOTÓN TIENE SU HORA
+                "dato_extra": dato_extra
+            })
             
-            # Agregar al resumen de texto
-            emoji = "📅" if tipo == 'agendar_calendario' else ("⏰" if tipo == 'poner_alarma' else "📍")
-            resumen_bonito.append(f"{emoji} {item.get('titulo')} ({hora_legible})")
+            # Texto para la notificación
+            emoji = "⏰" if "alarma" in tipo else ("📅" if "calendario" in tipo else "📍")
+            resumen_texto_push.append(f"{emoji} {titulo_item}")
 
-        # Preparar Metadata final (Aquí fusionamos todo)
-        metadata_final = contexto.copy()
-        metadata_final['acciones_programadas'] = sub_acciones_guardadas # 🔥 AQUÍ ESTÁ LA MAGIA
+        # ---------------------------------------------------------
+        # 5. PREPARACIÓN FINAL DE DATOS (UN SOLO REGISTRO)
+        # ---------------------------------------------------------
         
-        # Eliminamos el link_meet genérico si no sirve, como pediste
-        if 'link_meet' in metadata_final and "new" in metadata_final['link_meet']:
+        # Limpiamos metadata y agregamos nuestra lista maestra de acciones
+        metadata_final = _limpiar_metadata_para_json(contexto)
+        metadata_final['acciones_programadas'] = acciones_para_metadata # 🔥 ESTO LEERÁ TU FRONTEND
+        
+        # Eliminamos el link meet genérico del nivel superior si existe (como pediste)
+        if 'link_meet' in metadata_final and 'new' in str(metadata_final['link_meet']):
             del metadata_final['link_meet']
 
-        metadata_limpia = _limpiar_metadata_para_json(metadata_final)
-
-        # =================================================================
-        # 💾 GUARDADO ÚNICO (UN SOLO INSERT)
-        # =================================================================
         datos_finales = {
             "usuario_id": usuario_id,
             "titulo": titulo_maestro,
-            "descripcion": descripcion_maestra, # Texto original del usuario
+            "descripcion": mensaje, # Guardamos lo que el usuario escribió realmente
             "prioridad": prioridad_maestra,
             "tipo": "manual",
             "estado": "pendiente",
-            "etiqueta": "NEGOCIO" if prioridad_maestra == "ALTA" else "PERSONAL",
+            "etiqueta": "NEGOCIO" if prioridad_maestra == "ALTA" else "OTROS",
             "fecha_limite": fecha_limite_maestra,
-            "metadata": metadata_limpia
+            "metadata": metadata_final
         }
 
+        # ---------------------------------------------------------
+        # 6. GUARDADO Y NOTIFICACIÓN (UNA SOLA VEZ)
+        # ---------------------------------------------------------
         res = supabase.table('alertas').insert(datos_finales).execute()
 
-        # =================================================================
-        # 🔔 NOTIFICACIÓN ÚNICA (CON TODOS LOS BOTONES)
-        # =================================================================
         if res.data:
+            # Enviar UNA sola notificación con el resumen
             user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
             if user_data.data and user_data.data[0].get('fcm_token'):
                 token = user_data.data[0]['fcm_token']
                 
-                # Cuerpo de la notificación: Resumen de acciones
-                cuerpo_push = "Incluye: " + ", ".join([a['titulo'] for a in sub_acciones_guardadas])
+                # Cuerpo: "⏰ Alarma 2pm, 📅 Entrevista 5pm"
+                cuerpo_push = ", ".join(resumen_texto_push)
                 
                 enviar_push(
                     token=token,
-                    titulo=f"⚡ Nueva Tarea: {titulo_maestro}",
-                    cuerpo=cuerpo_push,
+                    titulo=f"⚡ Agenda: {titulo_maestro}",
+                    cuerpo=f"Acciones: {cuerpo_push}",
                     data_extra={
-                        "tipo": "TAREA_MAESTRA", # Cambiamos tipo para que el App sepa que es compleja
+                        "tipo": "TAREA_MAESTRA", # Tipo especial para que tu App sepa que hay botones dentro
                         "alerta_id": str(res.data[0]['id']),
-                        "acciones_json": json.dumps(sub_acciones_guardadas), # 🔥 El App leerá esto para pintar botones
-                        "metadata": json.dumps(metadata_limpia)
+                        "acciones_json": json.dumps(acciones_para_metadata), # 🔥 La App usa esto para pintar botones
+                        "metadata": json.dumps(metadata_final)
                     }
                 )
-
-        # =================================================================
-        # 💬 RESPUESTA BONITA AL USUARIO
-        # =================================================================
-        texto_acciones = "\n".join(resumen_bonito)
-        
-        respuesta_final = (
-            f"✅ **Agendado: {titulo_maestro}**\n\n"
-            f"He detectado y configurado {len(sub_acciones_guardadas)} acciones:\n"
-            f"{texto_acciones}\n\n"
-            f"📌 *Toca la notificación para ejecutar todo.*"
-        )
-
-        return {
-            "status": "tarea_creada",
-            "respuesta": respuesta_final,
-            "metadata": metadata_limpia,
-            "cantidad_creada": 1 # Solo 1 tarea maestra creada
-        }
+            
+            return {
+                "status": "tarea_creada",
+                "respuesta": f"✅ **Agendado:** {titulo_maestro}\n\nConfiguré {len(acciones_para_metadata)} acciones:\n" + "\n".join(resumen_texto_push),
+                "metadata": metadata_final,
+                "cantidad_creada": 1
+            }
 
     except Exception as e:
-        print(f"🛑 Error: {e}")
-        return {"status": "error", "respuesta": "Ocurrió un error al procesar tu solicitud compleja."}
-        
-        # 🔥 INTENTO DE AUTO-REPARACIÓN
-        if "foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower():
-            try:
-                # Verificar si el usuario existe en auth.users
-                user_data = supabase.table('usuarios').select('id').eq('id', usuario_id).execute()
-                
-                if not user_data.data:
-                    # Crear usuario faltante
-                    auth_user = supabase.auth.get_user(usuario_id)
-                    if auth_user:
-                        supabase.table('usuarios').insert({
-                            'id': usuario_id,
-                            'email': auth_user.user.email,
-                            'nombre': 'Usuario'
-                        }).execute()
-                        
-                        # Reintentar guardar tarea
-                        res = supabase.table('alertas').insert(datos_finales).execute()
-                        
-                        return {
-                            "status": "tarea_creada",
-                            "respuesta": f"✅ Agendado: {datos_finales['titulo']}\n📅 {datos_finales['descripcion']}",
-                            "metadata": contexto,
-                            "link_meet": contexto.get('link_meet')
-                        }
-            except:
-                pass
-        
-        # Si todo falla, mensaje original
-        return {
-            "status": "error_db",
-            "respuesta": (
-                f"⚠️ Entendido: '{datos_finales['titulo']}'.\n\n"
-                "No pude guardarlo. Cierra sesión y vuelve a entrar."
-            )
+        print(f"🛑 Error General: {e}")
+        # Fallback Robusto (Tu código original de seguridad)
+        datos_fallback = {
+            "usuario_id": usuario_id,
+            "titulo": "Recordatorio Rápido",
+            "descripcion": mensaje,
+            "prioridad": "MEDIA",
+            "tipo": "manual",
+            "estado": "pendiente",
+            "metadata": contexto
         }
-
+        try:
+            supabase.table('alertas').insert(datos_fallback).execute()
+            return {"status": "tarea_creada", "respuesta": "Guardé tu nota (Hubo un error procesando los detalles automáticos)."}
+        except:
+            return {"status": "error_db", "respuesta": "No pude guardar la tarea."}
         
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
     """
