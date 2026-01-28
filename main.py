@@ -830,6 +830,8 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             emoji = "⏰" if "alarma" in tipo else ("📅" if "calendario" in tipo else "📍")
             resumen_texto_push.append(f"{emoji} {titulo_item}")
 
+        
+        
         # 5. Guardado en BD
         # Limpiamos metadata antigua que pudo haber fallado
         metadata_final = _limpiar_metadata_para_json(contexto)
@@ -861,15 +863,127 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             if user_data.data and user_data.data[0].get('fcm_token'):
                 token = user_data.data[0]['fcm_token']
                 
+                # 🔥 CONSTRUCCIÓN INTELIGENTE DE METADATA POR ACCIÓN
+                acciones_ejecutables = []
+
+                for accion_item in acciones_para_metadata:
+                    tipo = accion_item['tipo']
+                    fecha_iso = accion_item.get('fecha_hora_especifica')
+                    titulo_item = accion_item.get('titulo', titulo_maestro)
+                    
+                    # BASE: Metadata común para todas
+                    metadata_base = {
+                        'titulo': titulo_item,
+                        'descripcion': mensaje,
+                    }
+                    
+                    # ========================================================
+                    # PERSONALIZACIÓN POR TIPO DE ACCIÓN
+                    # ========================================================
+                    
+                    if tipo == 'poner_alarma':
+                        # ALARMA: Solo necesita hora
+                        if fecha_iso:
+                            try:
+                                partes = fecha_iso.split('T')
+                                fecha = partes[0]
+                                hora = partes[1][:8]  # "14:00:00"
+                                
+                                metadata_base.update({
+                                    'hora_alarma': hora,
+                                    'timestamp_alarma': fecha_iso,  # NUEVO: Campo dedicado
+                                    'fecha_hora': {
+                                        'fecha': fecha,
+                                        'hora': hora,
+                                        'timestamp': fecha_iso
+                                    }
+                                })
+                            except:
+                                pass
+                    
+                    elif tipo == 'agendar_calendario':
+                        # CALENDARIO: Fecha + hora de inicio/fin
+                        if fecha_iso:
+                            try:
+                                metadata_base['fecha_hora'] = {
+                                    'fecha': fecha_iso.split('T')[0],
+                                    'hora': fecha_iso.split('T')[1][:8],
+                                    'timestamp': fecha_iso
+                                }
+                            except:
+                                pass
+                    
+                    elif tipo == 'crear_meet':
+                        # MEET: Título + link
+                        metadata_base.update({
+                            'titulo': titulo_item,
+                            'link_meet': metadata_final.get('link_meet', 'https://meet.google.com/new')
+                        })
+                        # Si hay fecha (para agendar el meet), agregarla
+                        if fecha_iso:
+                            metadata_base['fecha_hora'] = {'timestamp': fecha_iso}
+                    
+                    elif tipo == 'ver_ubicacion':
+                        # MAPA: Dirección o coordenadas
+                        ubicacion_data = metadata_final.get('ubicacion', {})
+                        if not ubicacion_data or not ubicacion_data.get('direccion'):
+                            # Si no hay ubicación estructurada, extraer del mensaje
+                            ubicacion_data = {'direccion': mensaje}
+                        metadata_base['ubicacion'] = ubicacion_data
+                    
+                    elif tipo == 'llamar':
+                        # LLAMADA: Teléfono de la primera persona
+                        personas = metadata_final.get('personas', [])
+                        if personas and personas[0].get('telefono'):
+                            metadata_base['personas'] = personas
+                    
+                    elif tipo == 'whatsapp':
+                        # WHATSAPP: Teléfono + mensaje
+                        personas = metadata_final.get('personas', [])
+                        if personas and personas[0].get('telefono'):
+                            metadata_base.update({
+                                'personas': personas,
+                                'mensaje_sugerido': f"Hola, te escribo sobre: {titulo_item}"
+                            })
+                    
+                    elif tipo == 'email':
+                        # EMAIL: Destinatario + asunto
+                        personas = metadata_final.get('personas', [])
+                        if personas and personas[0].get('email'):
+                            metadata_base.update({
+                                'personas': personas,
+                                'mensaje_sugerido': mensaje[:500]  # Limitar cuerpo
+                            })
+                    
+                    elif tipo == 'abrir_yape':
+                        # YAPE: Teléfono + monto (si existe)
+                        personas = metadata_final.get('personas', [])
+                        if personas and personas[0].get('telefono'):
+                            metadata_base['personas'] = personas
+                            # Intentar extraer monto del mensaje
+                            import re
+                            match = re.search(r'S/?\s*(\d+\.?\d*)', mensaje)
+                            if match:
+                                metadata_base['monto'] = float(match.group(1))
+                    
+                    # Guardar acción con su metadata específico
+                    acciones_ejecutables.append({
+                        'tipo_accion': tipo,
+                        'metadata': metadata_base
+                    })
+
+                # 🔥 ENVIAR NOTIFICACIÓN CON ESTRUCTURA CORRECTA
                 enviar_push(
                     token=token,
-                    titulo=f"⚡ Agenda: {titulo_maestro}",
-                    cuerpo=f"Detalles: {', '.join(resumen_texto_push)}",
+                    titulo=f"⚡ {len(acciones_ejecutables)} Acciones Programadas",
+                    cuerpo=f"✅ {', '.join(resumen_texto_push)}",
                     data_extra={
-                        "tipo": "TAREA_MAESTRA",
+                        "tipo": "TAREA_EJECUTABLE",
+                        "ejecutar_automatico": "true",
                         "alerta_id": str(res.data[0]['id']),
-                        "acciones_json": json.dumps(acciones_para_metadata),
-                        "metadata": json.dumps(metadata_final)
+                        "acciones_totales": json.dumps([a['tipo_accion'] for a in acciones_ejecutables]),
+                        "metadata_por_accion": json.dumps(acciones_ejecutables),
+                        "total_acciones": str(len(acciones_ejecutables))
                     }
                 )
             
