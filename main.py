@@ -717,7 +717,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     prompt = f"""
         Actúa como un Asistente Ejecutivo Experto.
         HOY ES: {fecha_actual_str}
-        FECHA BASE DEL TEXTO: {fecha_base}
+        FECHA BASE DEL TEXTO: {fecha_referencia}
         MENSAJE DEL USUARIO: "{mensaje}"
 
         OBJETIVO: Desglosar el mensaje en una LISTA de acciones técnicas con sus fechas exactas.
