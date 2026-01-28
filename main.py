@@ -681,39 +681,35 @@ def _limpiar_metadata_para_json(metadata: Dict) -> Dict:
     return metadata_limpio
 
 
-
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
-    Versión 'PAQUETE MAESTRO': 
-    1. Detecta múltiples acciones con horas distintas (Alarma 2pm, Cita 5pm).
-    2. Guarda UNA sola tarea en la BD con todas las sub-acciones en metadata.
-    3. Envía UNA sola notificación con el resumen.
+    FUSIÓN: Estructura robusta del Código B + Inteligencia de fechas/acciones del Código A.
+    1. Usa el Prompt de Lista (A) para detectar múltiples acciones.
+    2. Mantiene la seguridad de BD y actualización de Meet (B).
+    3. Genera una notificación rica con detalles.
     """
-    # 1. Contexto Temporal (Igual que tu original)
+    
+    # --- 1. CONTEXTO TEMPORAL (Base del Código B) ---
     zona_horaria = pytz.timezone('America/Lima')
     ahora = datetime.now(zona_horaria)
     fecha_actual = ahora.strftime("%Y-%m-%d %H:%M:%S (%A)")
-    
-    # 2. Pre-análisis (Igual que tu original)
+
+    # --- 2. PRE-ANÁLISIS (Base del Código B) ---
     extractor = ExtractorContexto()
     contexto = enriquecer_alerta_con_contexto(
         titulo="Procesando...", 
         descripcion=mensaje
     )
-    
-    # --- CORRECCIÓN 1: Obtención Segura de Fecha Base ---
-    # Si el extractor local falla (devuelve None), usamos la fecha de hoy como referencia
-    # para que la IA haga el cálculo relativo.
+
+    # --- 🔴 INYECCIÓN INTELIGENTE (Del Código A) ---
+    # Calculamos una fecha de referencia segura por si el regex falla
     datos_fecha = contexto.get('fecha_hora')
     if datos_fecha and isinstance(datos_fecha, dict):
         fecha_referencia = datos_fecha.get('fecha', ahora.strftime("%Y-%m-%d"))
     else:
-        # Si falló el regex, le damos HOY a la IA para que ella calcule
         fecha_referencia = ahora.strftime("%Y-%m-%d")
 
-    # ---------------------------------------------------------
-    # 3. PROMPT NUEVO: ESTRUCTURA DE LISTA DE ACCIONES
-    # ---------------------------------------------------------
+    # --- 🔴 PROMPT POTENCIADO (Del Código A - Pide Lista) ---
     prompt = f"""
         Actúa como un Asistente Ejecutivo Experto.
         HOY ES: {fecha_actual}
@@ -725,61 +721,34 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         INSTRUCCIONES:
         1. Identifica todas las intenciones: Alarma, Calendario, Meet, Mapa, Llamada, WhatsApp.
         2. Para CADA acción, calcula la "fecha_iso" exacta.
-           - Ejemplo: Si dice "Alarma a las 2pm" -> "2026-02-02T14:00:00"
-           - Ejemplo: Si dice "Reunión a las 5pm" -> "2026-02-02T17:00:00"
-        
-        REGLAS DE SALIDA (JSON):
-        Devuelve una LISTA JSON (Array) de objetos.
+
+        REGLAS DE SALIDA (JSON ARRAY):
         [
             {{
-                "titulo": "Nombre corto de la sub-acción",
-                "descripcion": "Descripción detallada con fecha y hora",
+                "titulo": "Nombre corto",
+                "descripcion": "Descripción detallada",
                 "tipo_accion": "poner_alarma" | "agendar_calendario" | "crear_meet" | "ver_ubicacion",
-                "prioridad": "ALTA",
-                "etiqueta": "NEGOCIO",
+                "prioridad": "ALTA" | "MEDIA",
+                "etiqueta": "NEGOCIO" | "PERSONAL",
                 "fecha_iso": "YYYY-MM-DDTHH:MM:SS" (OBLIGATORIO),
-                "mensaje_usuario": "Confirmación"
-                "dato_extra": "Link de meet, Dirección, o Teléfono"
+                "dato_extra": "Link, Dirección o Teléfono"
             }}
         ]
         
-        REGLAS OBLIGATORIAS:
+        REGLAS CRÍTICAS:
+        - "fecha_iso": Formato ISO ESTRICTO. Si dice "mañana a las 5pm", calcula la fecha real.
+        - Si hay "meet" o "videollamada", tipo_accion es "crear_meet".
         
-        1. **titulo**: Máximo 50 caracteres. Ejemplo: "Entrevista BCP Product Owner"
-        
-        2. **descripcion**: DEBE incluir:
-        - Fecha COMPLETA calculada (Ejemplo: "5 de febrero de 2026")
-        - Hora EXACTA (Ejemplo: "5:00 PM" o "17:00")
-        - Lugar específico si se menciona
-        - Contexto importante
-        
-        3. **fecha_limite**: Formato ISO ESTRICTO: "YYYY-MM-DDTHH:MM:SS"
-        - "5 de la tarde" → "2026-02-05T17:00:00"
-        - "2 de la tarde" → "2026-02-05T14:00:00"
-        - Si dice "mañana", calcular basándote en que HOY es {fecha_actual}
-        
-        4. **etiqueta**: DEBE ser UNA de estas opciones:
-        - NEGOCIO (trabajo, reuniones, entrevistas)
-        - ESTUDIO (clases, exámenes)
-        - SALUD (citas médicas)
-        - PERSONAL (compras, trámites)
-        - OTROS (todo lo demás)
-        
-        5. **prioridad**: DEBE ser UNA de estas:
-        - ALTA (urgente, entrevistas, citas médicas)
-        - MEDIA (importante pero no urgente)
-        - BAJA (puede esperar)
-        
-                
-        7. **mensaje_usuario**: Confirmación breve (Ejemplo: "Agendado: Entrevista BCP el 5/02 a las 5 PM")
-        
-        RESPONDE SOLO CON EL JSON. SIN TEXTO ADICIONAL. SIN EXPLICACIONES.
+        RESPONDE SOLO CON EL ARRAY JSON.
     """
-    try:
-        if not gemini_client:
-            raise Exception("Cliente Gemini no disponible")
 
-        # Llamada a Gemini
+    datos_finales = {}
+    acciones_para_metadata = [] # Lista para guardar las sub-acciones
+
+    # --- 3. LLAMADA A IA (Estructura B con lógica de A) ---
+    try:
+        if not gemini_client: raise Exception("Cliente Gemini no disponible")
+
         resp = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
@@ -788,215 +757,159 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
         texto_limpio = resp.text.replace("```json", "").replace("```", "").strip()
         lista_acciones = json.loads(texto_limpio)
+        
+        # Aseguramos que sea lista, incluso si la IA devuelve un solo objeto
         if isinstance(lista_acciones, dict): lista_acciones = [lista_acciones]
 
-        print(f"🤖 IA detectó e interpretó {len(lista_acciones)} acciones con fechas corregidas.")
+        print(f"🤖 IA detectó {len(lista_acciones)} acciones.")
 
-        # 4. Lógica de Agregación
-        titulo_maestro = "Nueva Tarea Inteligente"
-        prioridad_maestra = "MEDIA"
-        fecha_limite_maestra = None 
+        # --- 🔴 LÓGICA DE AGREGACIÓN (Del Código A adaptada a B) ---
+        # Necesitamos elegir UNA acción principal para el título de la BD, 
+        # pero guardar TODAS en metadata.
         
-        acciones_para_metadata = [] 
-        resumen_texto_push = []
-
-        for item in lista_acciones:
-            tipo = item.get('tipo_accion', 'general')
-            fecha_iso = item.get('fecha_iso') # 🔥 Aquí viene la fecha corregida por IA
-            titulo_item = item.get('titulo', 'Acción')
-            dato_extra = item.get('dato_extra')
-
-            # Si por alguna razón la IA falla en la fecha ISO, usamos un fallback seguro
-            if not fecha_iso:
-                fecha_iso = f"{fecha_referencia}T09:00:00"
-
-            # Definir Título Principal
-            if tipo == 'agendar_calendario':
-                titulo_maestro = titulo_item
-                prioridad_maestra = "ALTA"
-                fecha_limite_maestra = fecha_iso
-            elif tipo == 'poner_alarma' and titulo_maestro == "Nueva Tarea Inteligente":
-                titulo_maestro = titulo_item
-                if not fecha_limite_maestra: fecha_limite_maestra = fecha_iso
-
-            # Guardamos la acción
+        titulo_principal = "Nueva Tarea"
+        descripcion_principal = mensaje
+        prioridad_principal = "MEDIA"
+        fecha_limite_principal = None
+        etiqueta_principal = "OTROS"
+        
+        # Procesamos la lista
+        for i, item in enumerate(lista_acciones):
+            # Guardar en lista limpia para metadata
             acciones_para_metadata.append({
-                "tipo": tipo,
-                "titulo": titulo_item,
-                "fecha_hora_especifica": fecha_iso, # 🔥 Fecha inteligente
-                "dato_extra": dato_extra
+                "tipo": item.get('tipo_accion'),
+                "titulo": item.get('titulo'),
+                "fecha_hora_especifica": item.get('fecha_iso'),
+                "dato_extra": item.get('dato_extra')
             })
-            
-            emoji = "⏰" if "alarma" in tipo else ("📅" if "calendario" in tipo else "📍")
-            resumen_texto_push.append(f"{emoji} {titulo_item}")
 
-        
-        
-        # 5. Guardado en BD
-        # Limpiamos metadata antigua que pudo haber fallado
-        metadata_final = _limpiar_metadata_para_json(contexto)
-        
-        # Inyectamos nuestra lista corregida
-        metadata_final['acciones_programadas'] = acciones_para_metadata
-        
-        # Limpieza estética
-        if 'link_meet' in metadata_final and 'new' in str(metadata_final['link_meet']):
-            del metadata_final['link_meet']
+            # Lógica para elegir quién manda en el título (Prioridad: Calendario > Alarma > Otros)
+            if i == 0 or item.get('tipo_accion') == 'agendar_calendario':
+                titulo_principal = item.get('titulo')
+                descripcion_principal = item.get('descripcion')
+                prioridad_principal = item.get('prioridad')
+                fecha_limite_principal = item.get('fecha_iso')
+                etiqueta_principal = item.get('etiqueta')
 
+        # Si la IA falló en la fecha, fallback seguro
+        if not fecha_limite_principal:
+             fecha_limite_principal = f"{fecha_referencia}T09:00:00"
+
+        # Actualizamos el contexto con la inteligencia nueva
+        contexto['acciones_programadas'] = acciones_para_metadata # 🔥 CLAVE: Aquí viajan los detalles
+        if 'crear_meet' in [x['tipo'] for x in acciones_para_metadata]:
+            contexto['link_meet'] = "https://meet.google.com/new" # Preparamos para lógica legacy
+
+        # Preparamos el objeto para BD (Formato B)
         datos_finales = {
             "usuario_id": usuario_id,
-            "titulo": titulo_maestro,
-            "descripcion": mensaje,
-            "prioridad": prioridad_maestra,
+            "titulo": titulo_principal,
+            "descripcion": descripcion_principal,
+            "prioridad": prioridad_principal,
             "tipo": "manual",
             "estado": "pendiente",
-            "etiqueta": "NEGOCIO" if prioridad_maestra == "ALTA" else "OTROS",
-            "fecha_limite": fecha_limite_maestra, # Usamos la fecha corregida por IA
-            "metadata": metadata_final
+            "etiqueta": etiqueta_principal,
+            "fecha_limite": fecha_limite_principal,
+            "metadata": contexto 
         }
 
+    except Exception as e_ia:
+        print(f"⚠️ IA Falló o formato incorrecto: {e_ia}. Usando Fallback Manual.")
+        # --- FALLBACK (Seguridad del Código B) ---
+        datos_finales = {
+            "usuario_id": usuario_id,
+            "titulo": "Recordatorio Rápido",
+            "descripcion": mensaje,
+            "prioridad": "MEDIA",
+            "tipo": "manual",
+            "estado": "pendiente",
+            "etiqueta": "OTROS",
+            "fecha_limite": None,
+            "metadata": contexto
+        }
+
+    # --- 4. GUARDADO EN BD (Robustez del Código B) ---
+    try:
         res = supabase.table('alertas').insert(datos_finales).execute()
 
-        # 6. Notificación
-        if res.data:
+        # --- 🔵 LÓGICA LEGACY: Actualizar Meet (Del Código B) ---
+        # Esta lógica es muy buena, la mantenemos para obtener el link real si se crea
+        has_meet = any(acc['tipo'] == 'crear_meet' for acc in acciones_para_metadata)
+        if res.data and has_meet:
+            try:
+                alerta_id = res.data[0]['id']
+                import asyncio
+                await asyncio.sleep(2) # Esperar al trigger de BD
+                
+                alerta_actualizada = supabase.table('alertas').select('metadata').eq('id', alerta_id).execute()
+                meta_db = alerta_actualizada.data[0].get('metadata', {})
+                
+                if meta_db.get('link_meet') and meta_db['link_meet'] != 'https://meet.google.com/new':
+                    contexto['link_meet'] = meta_db['link_meet']
+                    # Actualizamos también nuestra lista de acciones en memoria
+                    for acc in acciones_para_metadata:
+                        if acc['tipo'] == 'crear_meet':
+                            acc['dato_extra'] = meta_db['link_meet']
+            except Exception as e:
+                print(f"⚠️ No se pudo actualizar link Meet: {e}")
+
+        # --- 5. NOTIFICACIÓN (Fusión: Lógica B con Datos A) ---
+        try:
             user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
             if user_data.data and user_data.data[0].get('fcm_token'):
                 token = user_data.data[0]['fcm_token']
                 
-                # 🔥 CONSTRUCCIÓN INTELIGENTE DE METADATA POR ACCIÓN
-                acciones_ejecutables = []
+                # Creamos un resumen bonito para el push
+                resumen_acciones = ", ".join([f"📌 {x['titulo']}" for x in acciones_para_metadata])
+                if not resumen_acciones: resumen_acciones = datos_finales['descripcion']
 
-                for accion_item in acciones_para_metadata:
-                    tipo = accion_item['tipo']
-                    fecha_iso = accion_item.get('fecha_hora_especifica')
-                    titulo_item = accion_item.get('titulo', titulo_maestro)
-                    
-                    # BASE: Metadata común para todas
-                    metadata_base = {
-                        'titulo': titulo_item,
-                        'descripcion': mensaje,
-                    }
-                    
-                    # ========================================================
-                    # PERSONALIZACIÓN POR TIPO DE ACCIÓN
-                    # ========================================================
-                    
-                    if tipo == 'poner_alarma':
-                        # ALARMA: Solo necesita hora
-                        if fecha_iso:
-                            try:
-                                partes = fecha_iso.split('T')
-                                fecha = partes[0]
-                                hora = partes[1][:8]  # "14:00:00"
-                                
-                                metadata_base.update({
-                                    'hora_alarma': hora,
-                                    'timestamp_alarma': fecha_iso,  # NUEVO: Campo dedicado
-                                    'fecha_hora': {
-                                        'fecha': fecha,
-                                        'hora': hora,
-                                        'timestamp': fecha_iso
-                                    }
-                                })
-                            except:
-                                pass
-                    
-                    elif tipo == 'agendar_calendario':
-                        # CALENDARIO: Fecha + hora de inicio/fin
-                        if fecha_iso:
-                            try:
-                                metadata_base['fecha_hora'] = {
-                                    'fecha': fecha_iso.split('T')[0],
-                                    'hora': fecha_iso.split('T')[1][:8],
-                                    'timestamp': fecha_iso
-                                }
-                            except:
-                                pass
-                    
-                    elif tipo == 'crear_meet':
-                        # MEET: Título + link
-                        metadata_base.update({
-                            'titulo': titulo_item,
-                            'link_meet': metadata_final.get('link_meet', 'https://meet.google.com/new')
-                        })
-                        # Si hay fecha (para agendar el meet), agregarla
-                        if fecha_iso:
-                            metadata_base['fecha_hora'] = {'timestamp': fecha_iso}
-                    
-                    elif tipo == 'ver_ubicacion':
-                        # MAPA: Dirección o coordenadas
-                        ubicacion_data = metadata_final.get('ubicacion', {})
-                        if not ubicacion_data or not ubicacion_data.get('direccion'):
-                            # Si no hay ubicación estructurada, extraer del mensaje
-                            ubicacion_data = {'direccion': mensaje}
-                        metadata_base['ubicacion'] = ubicacion_data
-                    
-                    elif tipo == 'llamar':
-                        # LLAMADA: Teléfono de la primera persona
-                        personas = metadata_final.get('personas', [])
-                        if personas and personas[0].get('telefono'):
-                            metadata_base['personas'] = personas
-                    
-                    elif tipo == 'whatsapp':
-                        # WHATSAPP: Teléfono + mensaje
-                        personas = metadata_final.get('personas', [])
-                        if personas and personas[0].get('telefono'):
-                            metadata_base.update({
-                                'personas': personas,
-                                'mensaje_sugerido': f"Hola, te escribo sobre: {titulo_item}"
-                            })
-                    
-                    elif tipo == 'email':
-                        # EMAIL: Destinatario + asunto
-                        personas = metadata_final.get('personas', [])
-                        if personas and personas[0].get('email'):
-                            metadata_base.update({
-                                'personas': personas,
-                                'mensaje_sugerido': mensaje[:500]  # Limitar cuerpo
-                            })
-                    
-                    elif tipo == 'abrir_yape':
-                        # YAPE: Teléfono + monto (si existe)
-                        personas = metadata_final.get('personas', [])
-                        if personas and personas[0].get('telefono'):
-                            metadata_base['personas'] = personas
-                            # Intentar extraer monto del mensaje
-                            import re
-                            match = re.search(r'S/?\s*(\d+\.?\d*)', mensaje)
-                            if match:
-                                metadata_base['monto'] = float(match.group(1))
-                    
-                    # Guardar acción con su metadata específico
-                    acciones_ejecutables.append({
-                        'tipo_accion': tipo,
-                        'metadata': metadata_base
-                    })
-
-                # 🔥 ENVIAR NOTIFICACIÓN CON ESTRUCTURA CORRECTA
                 enviar_push(
                     token=token,
-                    titulo=f"⚡ {len(acciones_ejecutables)} Acciones Programadas",
-                    cuerpo=f"✅ {', '.join(resumen_texto_push)}",
+                    titulo=f"⚡ Agenda: {datos_finales['titulo']}",
+                    cuerpo=f"Detalles: {resumen_acciones}",
                     data_extra={
                         "tipo": "TAREA_EJECUTABLE",
+                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
                         "ejecutar_automatico": "true",
-                        "alerta_id": str(res.data[0]['id']),
-                        "acciones_totales": json.dumps([a['tipo_accion'] for a in acciones_ejecutables]),
-                        "metadata_por_accion": json.dumps(acciones_ejecutables),
-                        "total_acciones": str(len(acciones_ejecutables))
+                        "titulo": datos_finales['titulo'],
+                        "acciones_json": json.dumps(acciones_para_metadata), # 🔥 Enviamos la lista limpia
+                        "metadata": json.dumps(contexto)
                     }
                 )
-            
-            return {
-                "status": "tarea_creada",
-                "respuesta": f"✅ **Agendado:** {titulo_maestro}\n📅 Fecha: {fecha_limite_maestra.replace('T', ' ')}\n\nConfiguré {len(acciones_para_metadata)} acciones.",
-                "metadata": metadata_final
-            }
+        except Exception as e_push:
+            print(f"⚠️ Error Push: {e_push}")
 
-    except Exception as e:
-        print(f"🛑 Error General en Tarea: {e}")
-        return {"status": "error", "respuesta": "Ocurrió un error interno procesando la solicitud."}
-    
+        return {
+            "status": "tarea_creada",
+            "respuesta": f"✅ Agendado: {datos_finales['titulo']}\n📅 {len(acciones_para_metadata)} acciones configuradas.",
+            "metadata": contexto,
+            "acciones": acciones_para_metadata # Para que el Front pinte los botones
+        }
+
+    # --- 🔵 MANEJO DE ERRORES BD (Robustez del Código B) ---
+    except Exception as e_bd:
+        print(f"🛑 Error BD: {e_bd}")
+        # Intento de auto-creación de usuario (User Rescue)
+        if "foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower():
+            try:
+                auth_user = supabase.auth.get_user(usuario_id)
+                if auth_user:
+                    supabase.table('usuarios').insert({
+                        'id': usuario_id,
+                        'email': auth_user.user.email,
+                        'nombre': 'Usuario Recuperado'
+                    }).execute()
+                    # Reintento recursivo (solo una vez)
+                    return await crear_tarea_directa(mensaje, usuario_id) 
+            except:
+                pass
+        
+        return {
+            "status": "error_db", 
+            "respuesta": "No pude guardar la tarea. Por favor reinicia la sesión."
+        }
+
+   
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
     """
     Responde consultas conectando:
