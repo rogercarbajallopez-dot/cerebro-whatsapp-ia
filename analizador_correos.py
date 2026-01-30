@@ -456,6 +456,9 @@ class AnalizadorCorreos:
         for correo in correos:
             time.sleep(10)
             estadisticas['procesados'] += 1
+            # 🔥 NUEVO: Reportar progreso cada 10 correos
+            if i % 10 == 0:
+                print(f"📊 Progreso: {i}/{len(correos)} correos ({(i/len(correos)*100):.1f}%)")
             
             # ============================================
             # CAPA 1: Filtro rápido (sin IA)
@@ -724,11 +727,12 @@ Responde JSON:
                 perfil_ia = json.loads(response.text)
                 llamadas_ia += 1
 
-                # 👇 AGREGAR ESTA PAUSA AQUÍ
-                print(f"⏳ Pausando 4 segundos para no saturar a la IA...")
-                time.sleep(4) 
-                # 👆 FIN DE LO AGREGADO
-                
+                 # 🔥 PAUSA INTELIGENTE: Más tiempo para evitar límites
+                pausa_base = 10  # Segundos base
+                pausa_extra = 5 if llamadas_ia % 10 == 0 else 0  # +5s cada 10 llamadas
+                time.sleep(pausa_base + pausa_extra)
+                print(f"⏳ Pausando {pausa_base + pausa_extra}s (Llamadas IA: {llamadas_ia})")
+
                 # Guardar perfil completo
                 supabase_client.table('perfiles_contactos_gmail').insert({
                     'usuario_id': usuario_id,
