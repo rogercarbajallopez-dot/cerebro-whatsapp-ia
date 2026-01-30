@@ -453,7 +453,7 @@ class AnalizadorCorreos:
         
         correos_criticos = []
         
-        for correo in correos:
+        for i, correo in enumerate(correos, start=1):
             time.sleep(10)
             estadisticas['procesados'] += 1
             # 🔥 NUEVO: Reportar progreso cada 10 correos
