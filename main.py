@@ -1517,24 +1517,27 @@ async def enviar_correo_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# EN TU BACKEND (Python)
 @app.get("/api/correos-pendientes")
 async def obtener_correos_pendientes(
-    usuario_id: str = Depends(obtener_usuario_actual)
+    usuario_id: str = Depends(obtener_usuario_actual),
+    filtro: str = "todos"  # 🔥 NUEVO PARÁMETRO (por defecto 'todos')
 ):
-    """
-    Obtiene correos analizados que requieren acción.
-    """
     try:
-        correos = supabase.table('correos_analizados')\
+        query = supabase.table('correos_analizados')\
             .select('*')\
             .eq('usuario_id', usuario_id)\
-            .eq('requiere_accion', True)\
-            .order('score_importancia', desc=True)\
-            .limit(50)\
-            .execute()
+            .order('fecha', desc=True)\
+            .limit(50) # Ojo con el límite, quizás quieras subirlo para "todos"
+
+        # 🔥 LÓGICA DE FILTRADO
+        if filtro == "pendientes":
+            query = query.eq('requiere_accion', True)
+        # Si filtro es "todos", NO aplicamos el .eq('requiere_accion', True)
         
+        correos = query.execute()
         return {"correos": correos.data}
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
