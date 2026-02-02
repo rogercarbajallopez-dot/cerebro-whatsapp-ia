@@ -532,6 +532,7 @@ class AnalizadorCorreos:
                             'fecha_limite': f_limite,
                             'metadata': {
                                 'correo_id_gmail': correo.get('id'),
+                                'thread_id': correo.get('thread_id'),
                                 'contexto': analisis_completo.get('contexto_adicional'),
                                 'historial_previo': contexto_remitente.get('total_correos', 0)
                             }
