@@ -260,16 +260,22 @@ class GmailService:
             True si se envió correctamente
         """
         try:
-            mensaje = MIMEText(cuerpo)
-            mensaje['to'] = destinatario
-            mensaje['subject'] = asunto
+            # 1. 🔥 CORRECCIÓN: Usar utf-8 explícitamente en el cuerpo
+            from email.mime.text import MIMEText
+            from email.header import Header
             
-            # Codificar mensaje
+            mensaje = MIMEText(cuerpo, 'plain', 'utf-8')
+            mensaje['to'] = destinatario
+            
+            # 2. 🔥 CORRECCIÓN: Codificar el asunto para soportar tildes/ñ
+            mensaje['subject'] = Header(asunto, 'utf-8')
+            
+            # Codificar mensaje (Esto lo tenías bien, pero aseguramos el flujo)
             raw_mensaje = base64.urlsafe_b64encode(mensaje.as_bytes()).decode('utf-8')
             
             body = {'raw': raw_mensaje}
             
-            # Si es respuesta, agregar threadId
+            # Si es respuesta, agregar threadId (Esto ya lo tenías, lo preservamos)
             if thread_id:
                 body['threadId'] = thread_id
             
@@ -279,7 +285,7 @@ class GmailService:
                 body=body
             ).execute()
             
-            print(f"✅ Correo enviado a {destinatario}")
+            print(f"✅ Correo enviado a {destinatario} (Thread: {thread_id})")
             return True
         
         except HttpError as error:
