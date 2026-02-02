@@ -2,7 +2,7 @@
 SISTEMA DE ANÁLISIS INTELIGENTE DE CORREOS
 Reduce costos en 99% usando filtrado en 3 capas
 """
-
+import asyncio
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -162,7 +162,7 @@ class AnalizadorCorreos:
         Responde SOLO con este JSON:
         {{
             "requiere_accion": true/false,  // ¿El usuario debe hacer algo?
-            "categoria": "laboral" | "academico" | "financiero" | "personal" | "spam",
+            "categoria": "laboral" | "academico" | "salud" |"financiero" | "personal" | "spam",
             "urgencia": "alta" | "media" | "baja",
             "resumen_corto": "Una línea de máximo 60 caracteres"
         }}
@@ -452,110 +452,130 @@ class AnalizadorCorreos:
         }
         
         correos_criticos = []
-        
-        for i, correo in enumerate(correos, start=1):
-            time.sleep(10)
-            estadisticas['procesados'] += 1
-            # 🔥 NUEVO: Reportar progreso cada 10 correos
-            if i % 10 == 0:
-                print(f"📊 Progreso: {i}/{len(correos)} correos ({(i/len(correos)*100):.1f}%)")
+    
+        # 🚦 SEMÁFORO: Controla cuántos correos analiza la IA al mismo tiempo.
+        # 3 es el número mágico para la capa gratuita/flash de Gemini.
+        # Evita el Error 503 por sobrecarga.
+        semaforo = asyncio.Semaphore(3) 
+
+        async def _procesar_un_correo(correo):
+            """Función interna que procesa UN solo correo completa."""
+            nonlocal estadisticas
             
-            # ============================================
-            # CAPA 1: Filtro rápido (sin IA)
-            # ============================================
+            # --- CAPA 1: FILTRO RÁPIDO (CPU) ---
             if self.es_spam_obvio(correo):
-                estadisticas['spam_descartado'] += 1
-                continue
-            
+                return 'spam'
+
             score = self.calcular_score_inicial(correo, nombre_usuario)
-            
-            # Si el score es muy bajo, ni siquiera usamos IA
             if score < 30:
+                return 'spam'
+
+            # --- CAPA 2: CLASIFICACIÓN RÁPIDA (CONCURRENTE) ---
+            # Usamos el semáforo aquí para pedir permiso antes de llamar a la IA
+            async with semaforo:
+                try:
+                    # Pequeña pausa aleatoria para no golpear la API exactamente al mismo milisegundo
+                    await asyncio.sleep(0.1) 
+                    
+                    clasificacion = await self.clasificar_con_ia_rapida(correo, gemini_client)
+                    
+                    if clasificacion['categoria'] == 'spam' or not clasificacion['requiere_accion']:
+                        return 'baja'
+
+                    # --- CAPA 3: ANÁLISIS PROFUNDO (Solo si es necesario) ---
+                    if clasificacion['urgencia'] == 'alta' or score > 70:
+                        
+                        # Obtener contexto (Rápido)
+                        contexto_remitente = await self.obtener_contexto_remitente(
+                            correos=correos,
+                            usuario_id=usuario_id,
+                            remitente=correo['de'],
+                            gemini_client=gemini_client,
+                            supabase_client=supabase_client,
+                            nombre_usuario=nombre_usuario,
+                            cuenta_gmail_id=cuenta_gmail_id
+                        )
+                        
+                        # Análisis Profundo
+                        analisis_completo = await self.analizar_profundo(
+                            correo,
+                            contexto_remitente.get('historial_completo', []),
+                            gemini_client,
+                            contexto_adicional=contexto_remitente
+                        )
+
+                        # Manejo de fechas seguro
+                        f_limite = analisis_completo.get('fecha_limite')
+                        if hasattr(f_limite, 'isoformat'):
+                            f_limite = f_limite.isoformat()
+                        elif f_limite is None:
+                            f_limite = None
+                        else:
+                            f_limite = str(f_limite)
+
+                        # Guardar en BD
+                        datos_bd = {
+                            'usuario_id': usuario_id,
+                            'cuenta_gmail_id': cuenta_gmail_id,
+                            'remitente': correo['de'],
+                            'asunto': correo['asunto'],
+                            'fecha': correo.get('fecha'),
+                            'score_importancia': score,
+                            'cuerpo_html': correo.get('cuerpo_html', ''),
+                            'cuerpo_texto': correo.get('cuerpo', ''),
+                            'categoria': clasificacion['categoria'],
+                            'urgencia': clasificacion['urgencia'],
+                            'requiere_accion': True,
+                            'respuesta_sugerida': analisis_completo.get('respuesta_sugerida', ''),
+                            'tono_detectado': analisis_completo.get('tono_detectado', 'Neutro'),
+                            'acciones_pendientes': analisis_completo.get('acciones_pendientes', []),
+                            'fecha_limite': f_limite,
+                            'metadata': {
+                                'correo_id_gmail': correo.get('id'),
+                                'contexto': analisis_completo.get('contexto_adicional'),
+                                'historial_previo': contexto_remitente.get('total_correos', 0)
+                            }
+                        }
+
+                        supabase_client.table('correos_analizados').insert(datos_bd).execute()
+                        
+                        # Agregar a lista de retorno
+                        correos_criticos.append({
+                            'correo': correo,
+                            'analisis': analisis_completo,
+                            'clasificacion': clasificacion
+                        })
+                        return 'alta'
+                    
+                    else:
+                        return 'media'
+
+                except Exception as e:
+                    print(f"⚠️ Error procesando correo {correo['id']}: {e}")
+                    return 'error'
+
+        # --- EJECUCIÓN PARALELA ---
+        print(f"🚀 Iniciando procesamiento paralelo de {len(correos)} correos...")
+        
+        # Creamos las tareas (Promises)
+        tareas = [_procesar_un_correo(c) for c in correos]
+        
+        # asyncio.gather ejecuta todo a la vez (respetando el semáforo)
+        resultados = await asyncio.gather(*tareas)
+        
+        # --- CONTEO FINAL ---
+        for res in resultados:
+            estadisticas['procesados'] += 1
+            if res == 'spam':
                 estadisticas['spam_descartado'] += 1
-                continue
-            
-            # ============================================
-            # CAPA 2: Clasificación rápida (IA Lite)
-            # ============================================
-            clasificacion = await self.clasificar_con_ia_rapida(correo, gemini_client)
-            
-            if clasificacion['categoria'] == 'spam' or not clasificacion['requiere_accion']:
+            elif res == 'baja':
                 estadisticas['accion_baja'] += 1
-                continue
-            
-            # ============================================
-            # CAPA 3: Análisis profundo (solo críticos)
-            # ============================================
-            
-            # DENTRO DE procesar_lote_correos, REEMPLAZA ESTE BLOQUE:
-            # (El que dice "# CAPA 3: Análisis profundo (solo críticos)")
-
-            if clasificacion['urgencia'] == 'alta' or score > 70:
-                # 🔥 OBTENER CONTEXTO ENRIQUECIDO
-                contexto_remitente = await self.obtener_contexto_remitente(
-                    correos=correos,              # 🔥 AGREGAR
-                    usuario_id=usuario_id,
-                    remitente=correo['de'],
-                    gemini_client=gemini_client,  # 🔥 AGREGAR
-                    supabase_client=supabase_client,
-                    nombre_usuario=nombre_usuario,
-                    cuenta_gmail_id=cuenta_gmail_id
-                )
-                
-                # Análisis profundo con contexto
-                analisis_completo = await self.analizar_profundo(
-                    correo,
-                    contexto_remitente.get('historial_completo', []),
-                    gemini_client,
-                    contexto_adicional=contexto_remitente  # 🔥 PASAR CONTEXTO
-                )
-                
-                # Preparar fecha límite como TEXTO para evitar el error JSON
-                f_limite = analisis_completo.get('fecha_limite')
-                if hasattr(f_limite, 'isoformat'): # Si es objeto fecha, convertirlo
-                    f_limite = f_limite.isoformat()
-                elif f_limite is None:
-                    f_limite = None
-                else:
-                    f_limite = str(f_limite) # Asegurar que sea string
-
-
-                # Guardar en BD
-                datos_bd = {
-                    'usuario_id': usuario_id,
-                    'cuenta_gmail_id': cuenta_gmail_id,  # 🔥 AGREGAR ESTA LÍNEA
-                    'remitente': correo['de'],
-                    'asunto': correo['asunto'],
-                    'fecha': correo.get('fecha'),
-                    'score_importancia': score,
-                    'cuerpo_html': correo['cuerpo_html'],  # 🔥 AGREGAR
-                    'cuerpo_texto': correo['cuerpo'],
-                    'categoria': clasificacion['categoria'],
-                    'urgencia': clasificacion['urgencia'],
-                    'requiere_accion': True,
-                    'respuesta_sugerida': analisis_completo['respuesta_sugerida'],
-                    'tono_detectado': analisis_completo['tono_detectado'],
-                    'acciones_pendientes': analisis_completo['acciones_pendientes'],
-                    'fecha_limite': f_limite, # 👈 USAMOS LA VARIABLE YA CONVERTIDA
-                    'metadata': {
-                        'correo_id_gmail': correo.get('id'),
-                        'contexto': analisis_completo.get('contexto_adicional'),
-                        'historial_previo': contexto_remitente.get('total_correos', 0),
-                        'cambio_tono': analisis_completo.get('cambio_tono', False)
-                    }
-                }
-                
-                supabase_client.table('correos_analizados').insert(datos_bd).execute()
-                
-                correos_criticos.append({
-                    'correo': correo,
-                    'analisis': analisis_completo,
-                    'clasificacion': clasificacion
-                })
-                
-                estadisticas['accion_alta'] += 1
-            else:
+            elif res == 'media':
                 estadisticas['accion_media'] += 1
+            elif res == 'alta':
+                estadisticas['accion_alta'] += 1
+
+        print(f"✅ Lote completado. Alta prioridad: {estadisticas['accion_alta']}")
         
         return {
             **estadisticas,
