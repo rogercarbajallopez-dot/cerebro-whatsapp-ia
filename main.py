@@ -27,6 +27,7 @@ from collections.abc import Iterable
 from contextlib import asynccontextmanager
 import os
 import json
+import requests
 import mimetypes
 import spacy
 from supabase import create_client, Client
@@ -1328,43 +1329,103 @@ async def sincronizar_correos(
     if not gemini_client:
         raise HTTPException(status_code=500, detail="IA no disponible")
     
+    # --- 🔥 ZONA DE CONFIGURACIÓN (NUEVO) ---
+    # Asegúrate que estos coincidan con tu Google Cloud Console y tu Flutter
+    GOOGLE_CLIENT_ID = "269344577878-gnf64lmpd3hcnlfsl1i5brduqvqq49na.apps.googleusercontent.com"
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET") # <--- ⚠️ PEGA TU SECRET AQUÍ (GOCSPX-...)
+    # Validación de seguridad para que no falle silenciosamente
+    if not GOOGLE_CLIENT_SECRET:
+        print("❌ ERROR CRÍTICO: No se encontró GOOGLE_CLIENT_SECRET en las variables de entorno.")
+        raise HTTPException(status_code=500, detail="Error de configuración del servidor (Secret faltante)")
+    # Esta URL no se usa realmente en este flujo post-mensaje, pero es requerida por el protocolo
+    REDIRECT_URI = "https://cerebro-whatsapp-ia.onrender.com/auth/callback" 
+    # ----------------------------------------
+
     try:
         # 1. Obtener datos del request
         body = await request.json()
         gmail_token = body.get('gmail_access_token')
-        email_gmail = body.get('email_gmail')  # 🔥 NUEVO: Email de la cuenta Gmail
+        email_gmail = body.get('email_gmail')
+        server_auth_code = body.get('server_auth_code') # 🔥 NUEVO: Recibimos el código
+
+        # --- 🔥 BLOQUE DE INTERCAMBIO DE TOKENS (NUEVO) ---
+        # Si llega un código, lo canjeamos por tokens reales antes de seguir
+        nuevo_refresh_token = None
         
+        if server_auth_code:
+            print(f"🔄 Canjeando código de autorización para: {email_gmail}")
+            try:
+                token_url = "https://oauth2.googleapis.com/token"
+                payload = {
+                    'client_id': GOOGLE_CLIENT_ID,
+                    'client_secret': GOOGLE_CLIENT_SECRET,
+                    'code': server_auth_code,
+                    'grant_type': 'authorization_code',
+                    'redirect_uri': REDIRECT_URI
+                }
+                res = requests.post(token_url, data=payload)
+                data_google = res.json()
+
+                if 'access_token' in data_google:
+                    # Actualizamos el token que usaremos para la lógica de abajo
+                    gmail_token = data_google['access_token']
+                    nuevo_refresh_token = data_google.get('refresh_token') # El tesoro
+                    print("✅ Token canjeado exitosamente.")
+                else:
+                    print(f"⚠️ Error canjeando token: {data_google}")
+
+            except Exception as e:
+                print(f"❌ Excepción al contactar Google: {e}")
+        # --------------------------------------------------
+
+        # Validación original (ahora valida el token ya sea que vino directo o del canje)
         if not gmail_token:
-            raise HTTPException(status_code=400, detail="Token de Gmail requerido")
+            raise HTTPException(status_code=400, detail="Token de Gmail requerido o fallo en autenticación")
         
-        # 2. 🔥 NUEVO: Buscar o crear registro de cuenta Gmail
+        # 2. 🔥 LÓGICA CORREGIDA: Upsert (Insertar o Actualizar)
         cuenta_gmail_id = None
         
-        if email_gmail:
-            # Intentar obtener la cuenta existente
-            cuenta_existente = supabase.table('cuentas_gmail')\
-                .select('id')\
-                .eq('usuario_id', usuario_id)\
-                .eq('email_gmail', email_gmail)\
-                .execute()
+        datos_cuenta = {
+            'usuario_id': usuario_id,
+            'email_gmail': email_gmail,
+            'access_token': gmail_token, # Guardamos el token más reciente
+            'activo': True,
+            'updated_at': "now()"
+        }
+
+        # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
+        if nuevo_refresh_token:
+            datos_cuenta['refresh_token'] = nuevo_refresh_token
+        elif body.get('refresh_token'): # Fallback por si viene en el body directo
+            datos_cuenta['refresh_token'] = body.get('refresh_token')
+
+        # Guardamos Client ID/Secret si vienen (para uso futuro)
+        datos_cuenta['client_id'] = GOOGLE_CLIENT_ID
+        datos_cuenta['client_secret'] = GOOGLE_CLIENT_SECRET
+
+        # Buscamos si existe para obtener el ID
+        cuenta_existente = supabase.table('cuentas_gmail')\
+            .select('id')\
+            .eq('usuario_id', usuario_id)\
+            .eq('email_gmail', email_gmail)\
+            .execute()
             
-            if cuenta_existente.data:
-                # Ya existe, usar ese ID
-                cuenta_gmail_id = cuenta_existente.data[0]['id']
-                print(f"✅ Usando cuenta Gmail existente: {email_gmail}")
-            else:
-                # No existe, crear nueva
-                nueva_cuenta = supabase.table('cuentas_gmail').insert({
-                    'usuario_id': usuario_id,
-                    'email_gmail': email_gmail,
-                    'activo': True,
-                    'access_token': gmail_token,  # Opcional: guardar token
-                }).execute()
-                
-                if nueva_cuenta.data:
-                    cuenta_gmail_id = nueva_cuenta.data[0]['id']
-                    print(f"✅ Nueva cuenta Gmail registrada: {email_gmail}")
-        
+        if cuenta_existente.data:
+            # SI EXISTE: Actualizamos (UPDATE)
+            cuenta_gmail_id = cuenta_existente.data[0]['id']
+            print(f"🔄 Actualizando tokens de cuenta existente: {email_gmail}")
+            supabase.table('cuentas_gmail')\
+                .update(datos_cuenta)\
+                .eq('id', cuenta_gmail_id)\
+                .execute()
+        else:
+            # NO EXISTE: Insertamos (INSERT)
+            print(f"✨ Creando nueva cuenta Gmail: {email_gmail}")
+            nueva_cuenta = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
+            if nueva_cuenta.data:
+                cuenta_gmail_id = nueva_cuenta.data[0]['id']
+
+
         # 3. Inicializar servicio de Gmail
         from gmail_service import GmailService
         gmail = GmailService(access_token=gmail_token)
