@@ -297,6 +297,9 @@ class GmailService:
         Marca un correo como leído.
         """
         try:
+            body = {
+                'removeLabelIds': ['UNREAD']
+            }
             self.service.users().messages().modify(
                 userId='me',
                 id=mensaje_id,
