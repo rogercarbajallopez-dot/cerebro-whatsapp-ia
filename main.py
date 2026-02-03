@@ -1430,15 +1430,59 @@ async def sincronizar_correos(
         from gmail_service import GmailService
         gmail = GmailService(access_token=gmail_token)
         
-        # 4. Obtener correos no leídos
+        # 4. Obtener correos no leídos (ESTO YA LO TIENES, DÉJALO IGUAL)
         correos_gmail = gmail.obtener_correos_no_leidos(cantidad=50)
         
         if not correos_gmail:
             return {
                 "status": "success",
-                "mensaje": "No hay correos nuevos",
+                "mensaje": "No hay correos nuevos en Gmail",
                 "estadisticas": {"procesados": 0}
             }
+
+        # ==============================================================================
+        # 🔥 INICIO DE LA MODIFICACIÓN (FILTRO DE IDEMPOTENCIA)
+        # ==============================================================================
+        
+        print(f"📥 Gmail devolvió {len(correos_gmail)} correos candidatos. Verificando duplicados...")
+
+        # A. Extraemos solo los IDs de los correos que acabamos de bajar
+        lista_ids_nuevos = [c['id'] for c in correos_gmail]
+
+        # B. Preguntamos a Supabase: "¿Cuáles de estos IDs ya tengo guardados?"
+        # ⚠️ IMPORTANTE: Asegúrate que la columna en Supabase se llame 'id_correo_gmail'
+        try:
+            existentes_response = supabase.table('correos_analizados')\
+                .select('id_correo_gmail')\
+                .in_('id_correo_gmail', lista_ids_nuevos)\
+                .execute()
+            
+            # C. Creamos una lista de "placas" que ya conocemos
+            ids_ya_procesados = {item['id_correo_gmail'] for item in existentes_response.data}
+            
+        except Exception as e:
+            print(f"⚠️ Advertencia: No se pudo verificar duplicados en Supabase ({e}). Se procesarán todos.")
+            ids_ya_procesados = set()
+
+        # D. EL FILTRO: Solo dejamos pasar los que NO están en la lista de procesados
+        correos_a_procesar = [c for c in correos_gmail if c['id'] not in ids_ya_procesados]
+
+        print(f"🛡️ Filtro aplicado: {len(ids_ya_procesados)} descartados. {len(correos_a_procesar)} irán a la IA.")
+
+        # E. Si después del filtro no queda nada, terminamos aquí para no gastar dinero ni tiempo
+        if not correos_a_procesar:
+             return {
+                "status": "success",
+                "mensaje": "Todos los correos recientes ya habían sido analizados previamente.",
+                "estadisticas": {
+                    "procesados": 0, 
+                    "omitidos_por_duplicidad": len(ids_ya_procesados)
+                }
+            }
+            
+        # ==============================================================================
+        # 🔥 FIN DE LA MODIFICACIÓN
+        # ==============================================================================
         
         # 5. Obtener datos del usuario (nombre)
         user_data = supabase.table('usuarios')\
@@ -1454,7 +1498,7 @@ async def sincronizar_correos(
         
         # 6. Procesar correos con el analizador inteligente
         resultado = await analizador_correos.procesar_lote_correos(
-            correos=correos_gmail,
+            correos=correos_a_procesar,
             usuario_id=usuario_id,
             gemini_client=gemini_client,
             supabase_client=supabase,
