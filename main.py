@@ -1338,7 +1338,7 @@ async def sincronizar_correos(
         print("❌ ERROR CRÍTICO: No se encontró GOOGLE_CLIENT_SECRET en las variables de entorno.")
         raise HTTPException(status_code=500, detail="Error de configuración del servidor (Secret faltante)")
     # Esta URL no se usa realmente en este flujo post-mensaje, pero es requerida por el protocolo
-    REDIRECT_URI = "https://cerebro-whatsapp-ia.onrender.com/auth/callback" 
+    REDIRECT_URI = "postmessage" 
     # ----------------------------------------
 
     try:
