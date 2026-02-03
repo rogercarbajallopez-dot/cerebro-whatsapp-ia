@@ -1547,9 +1547,10 @@ async def marcar_como_leido(
     usuario_id: str = Depends(obtener_usuario_actual)
 ):
     try:
-        # 1. Obtener el ID de Gmail y la cuenta vinculada desde Supabase
+        # 1. Obtener metadatos y el token de la cuenta vinculada
+        # Hacemos un join con cuentas_gmail para sacar el access_token
         datos_correo = supabase.table('correos_analizados')\
-            .select('metadata, cuenta_gmail_id')\
+            .select('metadata, cuenta_gmail_id, cuentas_gmail(access_token)')\
             .eq('id', correo_id)\
             .single()\
             .execute()
@@ -1558,7 +1559,11 @@ async def marcar_como_leido(
             raise HTTPException(status_code=404, detail="Correo no encontrado")
 
         gmail_msg_id = datos_correo.data['metadata'].get('correo_id_gmail')
-        cuenta_id = datos_correo.data.get('cuenta_gmail_id')
+        
+        # 🔥 CORRECCIÓN: Obtener el token de la relación
+        gmail_token = None
+        if datos_correo.data.get('cuentas_gmail'):
+             gmail_token = datos_correo.data['cuentas_gmail'].get('access_token')
 
         # 2. Actualizar en SUPABASE (Local)
         supabase.table('correos_analizados')\
@@ -1566,27 +1571,24 @@ async def marcar_como_leido(
             .eq('id', correo_id)\
             .execute()
 
-        # 3. Actualizar en GMAIL (Nube) - ¡ESTO ES LO QUE FALTABA!
-        if gmail_msg_id and cuenta_id:
-            # Instanciar servicio de Gmail (necesitas importar tu lógica de auth)
-            from gmail_service import GmailService # Asegúrate de importar esto
-            gmail_service = GmailService(usuario_id)
-            
-            # Si soportas múltiples cuentas, aquí deberías cargar el token de esa cuenta
-            # Por ahora, si usas 'me' y el token actual:
+        # 3. Actualizar en GMAIL (Nube)
+        if gmail_msg_id and gmail_token:
             try:
-                gmail_service.service.users().messages().modify(
-                    userId='me',
-                    id=gmail_msg_id,
-                    body={'removeLabelIds': ['UNREAD']} # 👈 QUITA LA ETIQUETA DE NO LEÍDO
-                ).execute()
-                print(f"✅ Correo {gmail_msg_id} marcado como leído en Gmail")
+                # 🔥 USAMOS EL TOKEN RECUPERADO
+                from gmail_service import GmailService
+                service = GmailService(access_token=gmail_token)
+                
+                service.marcar_como_leido(gmail_msg_id)
+                print(f"✅ Sincronizado con Gmail: {gmail_msg_id}")
+                
             except Exception as e_gmail:
-                print(f"⚠️ No se pudo sincronizar con Gmail: {e_gmail}")
+                # Si falla Gmail (token vencido), no rompemos la app, solo logueamos
+                print(f"⚠️ Warning: Marcado localmente, pero falló en Gmail: {e_gmail}")
 
         return {"mensaje": "Marcado como leído correctamente"}
 
     except Exception as e:
+        print(f"❌ Error crítico: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
