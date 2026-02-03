@@ -452,7 +452,32 @@ class AnalizadorCorreos:
         }
         
         correos_criticos = []
-    
+
+        # --- PASO 0: FILTRAR DUPLICADOS (AHORRO DE CUOTA) ---
+        # Sacamos los IDs de Gmail de la lista que acabamos de bajar
+        ids_gmail_entrantes = [c['id'] for c in correos]
+        
+        # Preguntamos a Supabase: "¿Cuáles de estos IDs ya tienes?"
+        # Nota: Asumimos que guardaste el ID de gmail en metadata->>correo_id_gmail
+        if ids_gmail_entrantes:
+            ya_existen = supabase_client.table('correos_analizados')\
+                .select('metadata')\
+                .eq('usuario_id', usuario_id)\
+                .filter('metadata->>correo_id_gmail', 'in', f'({",".join(ids_gmail_entrantes)})')\
+                .execute()
+            
+            # Crear set de IDs existentes para búsqueda rápida
+            ids_existentes = {fila['metadata']['correo_id_gmail'] for fila in ya_existen.data if fila.get('metadata')}
+            
+            # Filtrar: Nos quedamos SOLO con los que NO existen
+            correos_nuevos = [c for c in correos if c['id'] not in ids_existentes]
+            
+            print(f"📉 Filtro de duplicados: {len(correos)} entrantes -> {len(correos_nuevos)} nuevos reales.")
+            correos = correos_nuevos # Reemplazamos la lista
+            
+            if not correos:
+                return {'procesados': 0, 'mensaje': 'No hay correos nuevos'}
+
         # 🚦 SEMÁFORO: Controla cuántos correos analiza la IA al mismo tiempo.
         # 3 es el número mágico para la capa gratuita/flash de Gemini.
         # Evita el Error 503 por sobrecarga.
