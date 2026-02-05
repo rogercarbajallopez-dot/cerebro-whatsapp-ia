@@ -1819,58 +1819,69 @@ async def sincronizar_batch_nexus(
     x_device_id: str = Header(None),
     content_encoding: str = Header(None)
 ):
-    """Recibe mensajes de WhatsApp desde Android"""
+    """
+    Recibe lote de mensajes (1 o varios) desde Android, descomprime GZIP y guarda.
+    """
     try:
-        # Leer y descomprimir body
+        # 1. Obtener body crudo
         body = await request.body()
         
+        # 2. Descomprimir si viene en GZIP (Android lo envía así)
         if content_encoding == "gzip":
             try:
                 body = gzip.decompress(body)
-                print(f"📦 GZIP descomprimido: {len(body)} bytes")
+                print(f"📦 GZIP recibido: {len(body)} bytes descomprimidos")
             except Exception as e:
-                print(f"❌ Error descomprimiendo: {e}")
-                raise HTTPException(400, "Error en descompresión GZIP")
+                print(f"❌ Error descomprimiendo GZIP: {e}")
+                raise HTTPException(400, "El archivo GZIP está corrupto o es inválido")
         
-        # Parsear JSON
+        # 3. Convertir de JSON a Lista Python
         try:
             mensajes_raw = json.loads(body)
             if not isinstance(mensajes_raw, list):
-                raise ValueError("Se esperaba un array de mensajes")
+                raise ValueError("El formato no es una lista ([])")
         except Exception as e:
-            print(f"❌ Error parseando JSON: {e}")
-            raise HTTPException(400, f"JSON inválido: {str(e)}")
+            print(f"❌ JSON Inválido: {e}")
+            raise HTTPException(400, "JSON malformado")
         
-        print(f"✅ Recibidos {len(mensajes_raw)} mensajes de WhatsApp")
-        print(f"📱 Dispositivo: {x_device_id}")
+        print(f"✅ Procesando {len(mensajes_raw)} mensajes del dispositivo: {x_device_id}")
+
+        # 4. Guardar en Supabase
+        mensajes_guardados = 0
         
-        # TODO: Guardar en Supabase (tabla mensajes_whatsapp)
-        # Por ahora solo logueamos
         for msg in mensajes_raw:
-            print(f"  📩 {msg.get('chatNombre')}: {msg.get('contenido')[:50]}...")
+            try:
+                # ⚠️ VALIDA QUE ESTA VARIABLE 'supabase' COINCIDA CON TU CLIENTE EXISTENTE
+                supabase.table('mensajes_whatsapp').insert({
+                    'chat_id': msg.get('chatId'),
+                    'chat_nombre': msg.get('chatNombre'),
+                    'contenido': msg.get('contenido'),
+                    'timestamp': msg.get('timestamp'),
+                    'es_mio': msg.get('esMio'),
+                    'tipo': msg.get('tipo', 'texto'),
+                    'device_id': x_device_id,
+                    'sincronizado': True
+                }).execute()
+                
+                mensajes_guardados += 1
+                
+            except Exception as e_insert:
+                print(f"⚠️ Error guardando mensaje individual: {e_insert}")
+                # No detenemos el ciclo, intentamos con el siguiente
         
         return {
             "status": "success",
-            "mensajes_procesados": len(mensajes_raw),
-            "timestamp": datetime.utcnow().isoformat()
+            "recibidos": len(mensajes_raw),
+            "guardados": mensajes_guardados
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error inesperado: {e}")
+        print(f"❌ Error General en Endpoint: {e}")
         raise HTTPException(500, f"Error interno: {str(e)}")
 
-
-@app.get("/nexus/health")
-async def nexus_health():
-    """Health check de Nexus"""
-    return {
-        "status": "healthy",
-        "service": "nexus",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
