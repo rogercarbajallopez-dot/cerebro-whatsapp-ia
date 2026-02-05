@@ -9,7 +9,9 @@ from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredenti
 from fastapi.middleware.cors import CORSMiddleware
 from gmail_service import GmailService
 from analizador_correos import AnalizadorCorreos
+import gzip
 
+from fastapi import Header, Request
 
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
@@ -1807,6 +1809,67 @@ async def revertir_respondido(
     except Exception as e:
         print(f"Error revirtiendo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== ENDPOINTS NEXUS ====================
+
+@app.post("/nexus/sync/batch")
+async def sincronizar_batch_nexus(
+    request: Request,
+    x_batch_size: str = Header(None),
+    x_device_id: str = Header(None),
+    content_encoding: str = Header(None)
+):
+    """Recibe mensajes de WhatsApp desde Android"""
+    try:
+        # Leer y descomprimir body
+        body = await request.body()
+        
+        if content_encoding == "gzip":
+            try:
+                body = gzip.decompress(body)
+                print(f"📦 GZIP descomprimido: {len(body)} bytes")
+            except Exception as e:
+                print(f"❌ Error descomprimiendo: {e}")
+                raise HTTPException(400, "Error en descompresión GZIP")
+        
+        # Parsear JSON
+        try:
+            mensajes_raw = json.loads(body)
+            if not isinstance(mensajes_raw, list):
+                raise ValueError("Se esperaba un array de mensajes")
+        except Exception as e:
+            print(f"❌ Error parseando JSON: {e}")
+            raise HTTPException(400, f"JSON inválido: {str(e)}")
+        
+        print(f"✅ Recibidos {len(mensajes_raw)} mensajes de WhatsApp")
+        print(f"📱 Dispositivo: {x_device_id}")
+        
+        # TODO: Guardar en Supabase (tabla mensajes_whatsapp)
+        # Por ahora solo logueamos
+        for msg in mensajes_raw:
+            print(f"  📩 {msg.get('chatNombre')}: {msg.get('contenido')[:50]}...")
+        
+        return {
+            "status": "success",
+            "mensajes_procesados": len(mensajes_raw),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error inesperado: {e}")
+        raise HTTPException(500, f"Error interno: {str(e)}")
+
+
+@app.get("/nexus/health")
+async def nexus_health():
+    """Health check de Nexus"""
+    return {
+        "status": "healthy",
+        "service": "nexus",
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
