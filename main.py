@@ -12,7 +12,7 @@ from analizador_correos import AnalizadorCorreos
 import gzip
 
 from fastapi import Header, Request, BackgroundTasks
-
+from itertools import groupby
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
 
@@ -30,6 +30,7 @@ from contextlib import asynccontextmanager
 import os
 import json
 import requests
+import re
 import mimetypes
 import spacy
 from supabase import create_client, Client
@@ -1128,7 +1129,32 @@ async def buscar_contexto_historico(usuario_id: str, consulta: str):
         print(f"❌ Error buscando memoria: {e}")
         return ""
 
-
+def limpiar_json_gemini(texto_sucio: str) -> dict:
+    """
+    Limpia la respuesta de la IA para obtener un JSON válido.
+    Elimina bloques de código markdown y busca el primer '{' y último '}'.
+    """
+    try:
+        # 1. Si ya es un dict, devolverlo
+        if isinstance(texto_sucio, dict):
+            return texto_sucio
+            
+        # 2. Eliminar marcadores de código markdown (```json ... ```)
+        texto_limpio = re.sub(r'```json\s*', '', texto_sucio)
+        texto_limpio = re.sub(r'```', '', texto_limpio)
+        
+        # 3. Buscar el JSON entre llaves por si hay texto extra
+        inicio = texto_limpio.find('{')
+        fin = texto_limpio.rfind('}') + 1
+        
+        if inicio != -1 and fin != -1:
+            texto_limpio = texto_limpio[inicio:fin]
+            
+        return json.loads(texto_limpio)
+    except Exception as e:
+        print(f"⚠️ Error limpiando JSON: {e}")
+        # Retornamos una estructura vacía segura en caso de error fatal
+        return {"nuevo_resumen": "Error procesando resumen.", "tareas": [], "datos_clave": []}
 # ==============================================================================
 # ======================================================================
 # 🚀 ENDPOINTS API (ACTUALIZADOS CON AUTH)
@@ -1853,208 +1879,230 @@ async def sincronizar_batch_nexus(
         raise HTTPException(status_code=401, detail="Error de autenticación")
 
     try:
-        # 4. Descomprimir y procesar (Igual que antes)
+        # Descomprimir (Igual que antes)
         body = await request.body()
-        
         if content_encoding == "gzip":
             body = gzip.decompress(body)
-        
         mensajes_raw = json.loads(body)
         
-        print(f"✅ Recibidos {len(mensajes_raw)} mensajes del dispositivo {x_device_id}")
+        datos_para_insertar = []
         
-        mensajes_procesados = 0
-        
-        for msg_data in mensajes_raw:
-            try:
-                # === Procesar con IA ===
-                # Solo procesar mensajes RECIBIDOS
-                if not msg_data.get('esMio', False):
-                    
-                    background_tasks.add_task(
-                        procesar_mensaje_whatsapp_ia,
-                        mensaje_id=msg_data['id'],
-                        contenido=msg_data['contenido'],
-                        chat_nombre=msg_data['chatNombre'],
-                        usuario_id=USER_ID_REAL  # 5. USA EL ID REAL AQUÍ 🔥
-                    )
-                    
-                    mensajes_procesados += 1
-                
-                # === Guardar en Supabase ===
-                supabase.table('mensajes_whatsapp').insert({
-                    'usuario_id': USER_ID_REAL, # 6. USA EL ID REAL AQUÍ 🔥
-                    'chat_id': msg_data['chatId'],
-                    'chat_nombre': msg_data['chatNombre'],
-                    'contenido': msg_data['contenido'],
-                    'timestamp': msg_data['timestamp'],
-                    'es_mio': msg_data['esMio'],
-                    'tipo': msg_data['tipo'],
-                    'device_id': x_device_id,
-                    'sincronizado': True
-                }).execute()
-                
-            except Exception as e_msg:
-                print(f"⚠️ Error procesando mensaje individual: {e_msg}")
-        
+        for msg in mensajes_raw:
+            # Preparamos el objeto para Supabase
+            datos_para_insertar.append({
+                'id': msg['id'],
+                'usuario_id': USER_ID_REAL, # Tu variable de usuario validado
+                'chat_id': msg['chatId'],
+                'chat_nombre': msg['chatNombre'],
+                'contenido': msg['contenido'],
+                'timestamp': msg['timestamp'],
+                'es_mio': msg['esMio'],
+                'tipo': msg['tipo'],
+                'device_id': x_device_id,
+                'sincronizado': True,
+                'procesado_ia': False # <--- ESTO ES LO NUEVO: Entran como "pendientes"
+            })
+
+        # Insertamos todo de golpe (Bulk Insert es más eficiente)
+        if datos_para_insertar:
+            supabase.table('mensajes_whatsapp').upsert(datos_para_insertar).execute()
+            print(f"✅ Ingesta Rápida: {len(datos_para_insertar)} mensajes guardados (Pendientes de análisis).")
+
         return {
             "status": "success",
-            "usuario": USER_ID_REAL,
-            "mensajes_recibidos": len(mensajes_raw),
-            "mensajes_procesados": mensajes_procesados
+            "mode": "ingesta_rapida", # Confirmación de que no gastaste tokens
+            "mensajes_guardados": len(datos_para_insertar)
         }
         
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"❌ Error inesperado en Batch: {e}")
+        print(f"❌ Error en Batch: {e}")
         raise HTTPException(500, f"Error interno: {str(e)}")
 
 
-async def generar_respuesta_sugerida(pregunta: str, contexto: str) -> str:
+
+@app.post("/nexus/cerebro/activar")
+async def activar_cerebro_inteligente(
+    authorization: str = Header(None)
+):
     """
-    Genera una respuesta sugerida usando tu modelo de IA (Gemini)
+    CEREBRO INTELIGENTE (Producción):
+    1. Agrupa mensajes pendientes por chat.
+    2. Lee la memoria anterior de ese chat.
+    3. Analiza con IA buscando: Resumen actualizado, Tareas y Datos Clave.
+    4. Guarda todo en la BD y marca mensajes como procesados.
     """
+    
+    # --- 1. VALIDACIÓN DE SEGURIDAD ---
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta el Token")
     try:
-        # Asegúrate de que 'model' (Gemini) esté definido globalmente al inicio de tu script
-        prompt = f"""
-        Actúa como un asistente personal eficiente.
-        Contexto: {contexto}
-        Pregunta recibida: "{pregunta}"
-        
-        Tarea: Genera una respuesta sugerida profesional, concisa y útil.
-        Restricción: Máximo 2-3 oraciones. Tono amable pero directo.
-        """
-        
-        respuesta = model.generate_content(prompt)
-        return respuesta.text.strip()
-        
+        token = authorization.split(" ")[1]
+        user_response = supabase.auth.get_user(token)
+        if not user_response.user:
+            raise HTTPException(status_code=401, detail="Token inválido")
+        USER_ID_REAL = user_response.user.id
     except Exception as e:
-        print(f"⚠️ Error generando respuesta sugerida: {e}")
-        return "No se pudo generar una respuesta automática."
+        print(f"❌ Error Auth Cerebro: {e}")
+        raise HTTPException(status_code=401, detail="Error de autenticación")
+
+    print(f"🧠 Cerebro activado para usuario: {USER_ID_REAL}")
+
+    # --- 2. OBTENER MENSAJES PENDIENTES ---
+    try:
+        # Solo mensajes de ESTE usuario que NO han sido procesados
+        response = supabase.table('mensajes_whatsapp')\
+            .select('*')\
+            .eq('usuario_id', USER_ID_REAL)\
+            .eq('procesado_ia', False)\
+            .order('chat_nombre', desc=False)\
+            .order('timestamp', desc=False)\
+            .execute()
+        
+        mensajes = response.data
+        
+        if not mensajes:
+            return {"status": "sleep", "mensaje": "No hay mensajes nuevos para analizar."}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error leyendo mensajes: {e}")
+
+    # --- 3. PROCESAMIENTO POR LOTES (Conversaciones) ---
+    resultados_log = []
+    
+    # Agrupamos por nombre del chat (la lista debe estar ordenada por nombre primero)
+    # Nota: itertools.groupby requiere que la lista esté ordenada por la clave de agrupación
+    mensajes.sort(key=lambda x: x['chat_nombre'])
+    
+    for chat_nombre, grupo in groupby(mensajes, key=lambda x: x['chat_nombre']):
+        lista_mensajes = list(grupo)
+        
+        # Filtro de ruido: Si es muy poco texto, lo marcamos procesado y saltamos
+        # para no gastar IA en un "ok"
+        texto_total = " ".join([m['contenido'] for m in lista_mensajes])
+        if len(lista_mensajes) < 2 and len(texto_total) < 10:
+            ids_ruido = [m['id'] for m in lista_mensajes]
+            for mid in ids_ruido:
+                supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).eq('id', mid).execute()
+            print(f"⏩ Saltando hilo corto/ruido con {chat_nombre}")
+            continue
+
+        print(f"🤖 Analizando conversación con: {chat_nombre} ({len(lista_mensajes)} msgs)")
+
+        try:
+            # A. RECUPERAR MEMORIA PREVIA
+            memoria_db = supabase.table('memoria_chats')\
+                .select('*')\
+                .eq('chat_nombre', chat_nombre)\
+                .eq('usuario_id', USER_ID_REAL)\
+                .execute()
+                
+            contexto_previo = "Sin historial previo."
+            if memoria_db.data:
+                contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.')
+
+            # B. PREPARAR TRANSCRIPCIÓN
+            transcripcion = ""
+            ids_a_procesar = []
+            ultimo_timestamp = ""
+            
+            for m in lista_mensajes:
+                autor = "YO" if m['es_mio'] else chat_nombre
+                # Formato: [2023-10-27T10:00:00] YO: Hola
+                transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
+                ids_a_procesar.append(m['id'])
+                ultimo_timestamp = m['timestamp']
+
+            # C. PROMPT PARA GEMINI (Estructura Estricta)
+            prompt = f"""
+            Actúa como un Analista de Datos Personales experto.
+            
+            CONTEXTO ANTERIOR (Resumen de lo hablado antes):
+            "{contexto_previo}"
+            
+            NUEVA CONVERSACIÓN (Mensajes recientes):
+            {transcripcion}
+            
+            TU OBJETIVO:
+            Generar un JSON válido con 3 campos obligatorios:
+            
+            1. "nuevo_resumen": Un párrafo que combine el contexto anterior con lo nuevo. Si el tema cambió drásticamente, descarta lo viejo irrelevante. Mantén fechas y acuerdos.
+            2. "tareas": Una lista de objetos. Si no hay tareas, lista vacía []. Cada objeto debe tener:
+               - "titulo": Breve (ej: "Comprar leche")
+               - "descripcion": Detalles (ej: "Marca X, para mañana")
+               - "prioridad": "ALTA", "MEDIA" o "BAJA"
+            3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
+
+            IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
+            """
+
+            # D. LLAMADA A LA IA
+            # Asegúrate de que 'model' está inicializado globalmente en tu script
+            respuesta_ai = model.generate_content(prompt).text
+            
+            # E. LIMPIEZA Y PARSEO
+            datos_ia = limpiar_json_gemini(respuesta_ai)
+            
+            # F. GUARDAR MEMORIA ACTUALIZADA (Upsert)
+            datos_memoria = {
+                'chat_nombre': chat_nombre,
+                'usuario_id': USER_ID_REAL, # Importante para multi-usuario
+                'resumen_actual': datos_ia.get('nuevo_resumen', 'No se generó resumen.'),
+                'ultima_actualizacion': datetime.utcnow().isoformat(),
+                'temas_abiertos': datos_ia.get('intencion', 'OTROS')
+            }
+            supabase.table('memoria_chats').upsert(datos_memoria).execute()
+
+            # G. GUARDAR TAREAS / ALERTAS (Iteramos la lista que devolvió la IA)
+            tareas_detectadas = datos_ia.get('tareas', [])
+            for tarea in tareas_detectadas:
+                supabase.table('alertas').insert({
+                    'usuario_id': USER_ID_REAL,
+                    'titulo': f"⚡ {tarea.get('titulo', 'Nueva tarea')}",
+                    'descripcion': f"Origen: {chat_nombre}. {tarea.get('descripcion', '')}",
+                    'tipo': 'tarea_ia',
+                    'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
+                    'metadata': {
+                        'origen': 'whatsapp_cerebro',
+                        'chat': chat_nombre,
+                        'timestamp_origen': ultimo_timestamp
+                    }
+                }).execute()
+                print(f"   ✅ Tarea creada: {tarea.get('titulo')}")
+
+            # H. MARCAR MENSAJES COMO PROCESADOS
+            # Lo hacemos uno por uno o en batch si Supabase lo permite con 'in'. 
+            # Por seguridad haremos un update general por lista de IDs.
+            if ids_a_procesar:
+                supabase.table('mensajes_whatsapp')\
+                    .update({'procesado_ia': True})\
+                    .in_('id', ids_a_procesar)\
+                    .execute()
+
+            resultados_log.append({
+                "chat": chat_nombre,
+                "mensajes": len(lista_mensajes),
+                "tareas_creadas": len(tareas_detectadas)
+            })
+
+        except Exception as e_chat:
+            print(f"❌ Error procesando chat {chat_nombre}: {e_chat}")
+            continue # Si falla un chat, seguimos con el siguiente
+
+    return {
+        "status": "success",
+        "resumen_operacion": resultados_log
+    }
+
+
+
+
+
 
 
 # main.py - AÑADIR ESTA FUNCIÓN
 
 # main.py - VERSIÓN CORREGIDA Y COMPATIBLE
 
-async def procesar_mensaje_whatsapp_ia(
-    mensaje_id: str,
-    contenido: str,
-    chat_nombre: str,
-    usuario_id: str
-):
-    """
-    Procesa un mensaje de WhatsApp invocando a tus funciones MAESTRAS existentes.
-    """
-    try:
-        print(f"🤖 Procesando mensaje de {chat_nombre}: {contenido[:50]}...")
-        
-        # 1. Clasificar intención (Usamos tu función 'clasificar_intencion_portero')
-        decision = await clasificar_intencion_portero(contenido)
-        
-        tipo = decision.get('tipo', 'BASURA')
-        print(f"📊 Clasificación: {tipo} (confianza: {decision.get('confianza', 0)}%)")
-        
-        # 2. Procesar según el tipo detectado
-        
-        if tipo == 'VALOR':
-            # Información relevante (Memoria/Perfilado)
-            print(f"💎 Información de valor detectada")
-            
-            # 🔥 CORRECCIÓN CRÍTICA: Llamamos con los argumentos EXACTOS de tu función
-            await procesar_informacion_valor(
-                mensaje=contenido,    # Tu función espera 'mensaje', no 'contenido'
-                clasificacion=decision,
-                usuario_id=usuario_id,
-                origen="whatsapp"
-            )
-        
-        elif tipo == 'TAREA':
-            # Tarea o acción pendiente
-            print(f"✅ Tarea detectada")
-            
-            # 🔥 CORRECCIÓN CRÍTICA: Llamamos a tu función 'crear_tarea_directa'
-            # Tu función espera (mensaje, usuario_id)
-            await crear_tarea_directa(
-                mensaje=contenido, 
-                usuario_id=usuario_id
-            )
-        
-        elif tipo == 'PREGUNTA':
-            # Pregunta que requiere respuesta (Lógica nueva simple)
-            print(f"❓ Pregunta detectada")
-            
-            # Si tienes la función de respuesta sugerida, la usamos
-            respuesta_sugerida = ""
-            if 'generar_respuesta_sugerida' in globals():
-                respuesta_sugerida = await generar_respuesta_sugerida(
-                    pregunta=contenido,
-                    contexto=f"Mensaje de {chat_nombre}"
-                )
-            
-            # Guardamos la alerta
-            supabase.table('alertas').insert({
-                'usuario_id': usuario_id,
-                'titulo': f"Pregunta de {chat_nombre}",
-                'descripcion': contenido,
-                'tipo': 'pregunta_whatsapp',
-                'prioridad': 'MEDIA',
-                'metadata': {
-                    'respuesta_sugerida': respuesta_sugerida,
-                    'mensaje_id': mensaje_id,
-                    'chat_nombre': chat_nombre
-                }
-            }).execute()
-
-        elif tipo == 'URGENTE':
-            # Urgencia
-            print(f"🚨 Mensaje URGENTE detectado")
-            
-            # 1. Alerta en BD
-            supabase.table('alertas').insert({
-                'usuario_id': usuario_id,
-                'titulo': f"⚠️ URGENTE: {chat_nombre}",
-                'descripcion': contenido,
-                'tipo': 'urgente_whatsapp',
-                'prioridad': 'ALTA',
-                'etiqueta': 'URGENTE',
-                'metadata': {
-                    'mensaje_id': mensaje_id,
-                    'chat_nombre': chat_nombre,
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-            }).execute()
-            
-            # 2. Notificación Push (Si está disponible)
-            if 'enviar_notificacion_inteligente' in globals():
-                enviar_notificacion_inteligente(
-                    usuario_id=usuario_id, 
-                    titulo=f"🚨 URGENTE: {chat_nombre}",
-                    cuerpo=contenido[:100]
-                )
-        
-        else:
-            # BASURA / RUIDO
-            print(f"🗑️ Mensaje descartado (ruido)")
-        
-        # 3. Marcar mensaje como procesado en la BD
-        # Nota: Usamos un try/catch específico aquí por si el ID es un texto extraño
-        try:
-            supabase.table('mensajes_whatsapp').update({
-                'metadata': {
-                    'procesado': True,
-                    'clasificacion': tipo,
-                    'procesado_en': datetime.utcnow().isoformat()
-                }
-            }).eq('id', mensaje_id).execute()
-        except Exception as e_update:
-            print(f"⚠️ Nota: No se actualizó metadata del mensaje (posible ID legacy): {e_update}")
-
-        print(f"✅ Mensaje procesado exitosamente")
-        
-    except Exception as e:
-        print(f"❌ Error general procesando mensaje {mensaje_id}: {e}")
 
 
 # main.py - AÑADIR NUEVO ENDPOINT
