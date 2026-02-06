@@ -33,7 +33,7 @@ import requests
 import mimetypes
 import spacy
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
@@ -1910,6 +1910,30 @@ async def sincronizar_batch_nexus(
         print(f"❌ Error inesperado en Batch: {e}")
         raise HTTPException(500, f"Error interno: {str(e)}")
 
+
+async def generar_respuesta_sugerida(pregunta: str, contexto: str) -> str:
+    """
+    Genera una respuesta sugerida usando tu modelo de IA (Gemini)
+    """
+    try:
+        # Asegúrate de que 'model' (Gemini) esté definido globalmente al inicio de tu script
+        prompt = f"""
+        Actúa como un asistente personal eficiente.
+        Contexto: {contexto}
+        Pregunta recibida: "{pregunta}"
+        
+        Tarea: Genera una respuesta sugerida profesional, concisa y útil.
+        Restricción: Máximo 2-3 oraciones. Tono amable pero directo.
+        """
+        
+        respuesta = model.generate_content(prompt)
+        return respuesta.text.strip()
+        
+    except Exception as e:
+        print(f"⚠️ Error generando respuesta sugerida: {e}")
+        return "No se pudo generar una respuesta automática."
+
+
 # main.py - AÑADIR ESTA FUNCIÓN
 
 async def procesar_mensaje_whatsapp_ia(
@@ -2040,81 +2064,58 @@ async def procesar_mensaje_whatsapp_ia(
         traceback.print_exc()
 
 
-# main.py - AÑADIR FUNCIÓN OPCIONAL
-
-async def generar_respuesta_sugerida(pregunta: str, contexto: str) -> str:
-    """
-    Genera una respuesta sugerida usando tu modelo de IA
-    """
-    try:
-        # Usar tu modelo Gemini actual
-        prompt = f"""
-        Contexto: {contexto}
-        
-        Pregunta recibida: "{pregunta}"
-        
-        Por favor, genera una respuesta profesional, concisa y útil.
-        Máximo 2-3 oraciones.
-        """
-        
-        respuesta = model.generate_content(prompt)
-        
-        return respuesta.text.strip()
-        
-    except Exception as e:
-        print(f"Error generando respuesta: {e}")
-        return "No se pudo generar una respuesta automática."
-
 
 # main.py - AÑADIR NUEVO ENDPOINT
-
 @app.get("/nexus/estadisticas/{usuario_id}")
 async def obtener_estadisticas_nexus(usuario_id: str):
     """
-    Obtiene estadísticas de mensajes de WhatsApp procesados
+    Obtiene estadísticas de mensajes de WhatsApp procesados para Flutter
     """
     try:
-        # Total de mensajes
+        # 1. Total de mensajes
         total_mensajes = supabase.table('mensajes_whatsapp')\
             .select('*', count='exact')\
             .eq('usuario_id', usuario_id)\
             .execute()
+            
+        # 2. Mensajes de hoy (Calculamos fecha inicio del día)
+        hoy_str = datetime.utcnow().date().isoformat() # Ej: "2023-10-27"
         
-        # Mensajes de hoy
-        hoy = datetime.utcnow().date()
         mensajes_hoy = supabase.table('mensajes_whatsapp')\
             .select('*', count='exact')\
             .eq('usuario_id', usuario_id)\
-            .gte('created_at', hoy.isoformat())\
+            .gte('created_at', hoy_str)\
             .execute()
-        
-        # Alertas generadas
+            
+        # 3. Alertas generadas (Urgentes)
         alertas = supabase.table('alertas')\
             .select('*', count='exact')\
             .eq('usuario_id', usuario_id)\
             .eq('tipo', 'urgente_whatsapp')\
             .execute()
-        
-        # Chats activos
+            
+        # 4. Chats activos (Contamos nombres únicos)
+        # Nota: Traemos solo la columna chat_nombre para ser eficientes
         chats = supabase.table('mensajes_whatsapp')\
             .select('chat_nombre')\
             .eq('usuario_id', usuario_id)\
             .execute()
-        
-        chats_unicos = len(set([msg['chat_nombre'] for msg in chats.data]))
-        
-        # Mensaje más reciente
+            
+        # Usamos un Set de Python para eliminar duplicados y contar
+        chats_unicos = len(set([msg['chat_nombre'] for msg in chats.data if msg.get('chat_nombre')]))
+            
+        # 5. Fecha del último mensaje sincronizado
         ultimo_mensaje = supabase.table('mensajes_whatsapp')\
-            .select('*')\
+            .select('created_at')\
             .eq('usuario_id', usuario_id)\
-            .order('timestamp', desc=True)\
+            .order('created_at', desc=True)\
             .limit(1)\
             .execute()
-        
+            
         ultimo_sync = None
         if ultimo_mensaje.data:
             ultimo_sync = ultimo_mensaje.data[0]['created_at']
-        
+            
         return {
             "total_mensajes": total_mensajes.count or 0,
             "mensajes_hoy": mensajes_hoy.count or 0,
@@ -2125,8 +2126,9 @@ async def obtener_estadisticas_nexus(usuario_id: str):
         }
         
     except Exception as e:
-        print(f"Error obteniendo estadísticas: {e}")
-        raise HTTPException(500, str(e))
+        print(f"❌ Error obteniendo estadísticas: {e}")
+        # Importante: Retornamos un 500 para que Flutter sepa que falló
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/nexus/health")
 async def nexus_health():
