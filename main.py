@@ -11,7 +11,7 @@ from gmail_service import GmailService
 from analizador_correos import AnalizadorCorreos
 import gzip
 
-from fastapi import Header, Request
+from fastapi import Header, Request, BackgroundTasks
 
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
@@ -1812,75 +1812,321 @@ async def revertir_respondido(
 
 # ==================== ENDPOINTS NEXUS ====================
 
+# main.py - MODIFICAR EL ENDPOINT EXISTENTE
+
+# main.py - VERSIÓN CORREGIDA PARA LEER EL TOKEN DE ANDROID
+
 @app.post("/nexus/sync/batch")
 async def sincronizar_batch_nexus(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_batch_size: str = Header(None),
     x_device_id: str = Header(None),
-    content_encoding: str = Header(None)
+    content_encoding: str = Header(None),
+    authorization: str = Header(None) # 1. RECIBIMOS EL TOKEN AQUÍ
+    
 ):
     """
-    Recibe lote de mensajes (1 o varios) desde Android, descomprime GZIP y guarda.
+    Recibe mensajes de WhatsApp, VALIDA EL USUARIO y los procesa.
     """
+    
+    # 2. VALIDAR AUTENTICACIÓN (CRÍTICO)
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta el Token de autenticación")
+
     try:
-        # 1. Obtener body crudo
+        # El formato es "Bearer <token>", extraemos solo el token
+        token = authorization.split(" ")[1]
+        
+        # Le preguntamos a Supabase: "¿De quién es este token?"
+        user_response = supabase.auth.get_user(token)
+        
+        if not user_response.user:
+            raise HTTPException(status_code=401, detail="Token inválido o expirado")
+            
+        # 3. OBTENEMOS EL ID REAL DEL USUARIO
+        USER_ID_REAL = user_response.user.id
+        print(f"👤 Autenticado exitosamente: {USER_ID_REAL}")
+
+    except Exception as e:
+        print(f"❌ Error de autenticación: {e}")
+        raise HTTPException(status_code=401, detail="Error de autenticación")
+
+    try:
+        # 4. Descomprimir y procesar (Igual que antes)
         body = await request.body()
         
-        # 2. Descomprimir si viene en GZIP (Android lo envía así)
         if content_encoding == "gzip":
+            body = gzip.decompress(body)
+        
+        mensajes_raw = json.loads(body)
+        
+        print(f"✅ Recibidos {len(mensajes_raw)} mensajes del dispositivo {x_device_id}")
+        
+        mensajes_procesados = 0
+        
+        for msg_data in mensajes_raw:
             try:
-                body = gzip.decompress(body)
-                print(f"📦 GZIP recibido: {len(body)} bytes descomprimidos")
-            except Exception as e:
-                print(f"❌ Error descomprimiendo GZIP: {e}")
-                raise HTTPException(400, "El archivo GZIP está corrupto o es inválido")
-        
-        # 3. Convertir de JSON a Lista Python
-        try:
-            mensajes_raw = json.loads(body)
-            if not isinstance(mensajes_raw, list):
-                raise ValueError("El formato no es una lista ([])")
-        except Exception as e:
-            print(f"❌ JSON Inválido: {e}")
-            raise HTTPException(400, "JSON malformado")
-        
-        print(f"✅ Procesando {len(mensajes_raw)} mensajes del dispositivo: {x_device_id}")
-
-        # 4. Guardar en Supabase
-        mensajes_guardados = 0
-        
-        for msg in mensajes_raw:
-            try:
-                # ⚠️ VALIDA QUE ESTA VARIABLE 'supabase' COINCIDA CON TU CLIENTE EXISTENTE
+                # === Procesar con IA ===
+                # Solo procesar mensajes RECIBIDOS
+                if not msg_data.get('esMio', False):
+                    
+                    background_tasks.add_task(
+                        procesar_mensaje_whatsapp_ia,
+                        mensaje_id=msg_data['id'],
+                        contenido=msg_data['contenido'],
+                        chat_nombre=msg_data['chatNombre'],
+                        usuario_id=USER_ID_REAL  # 5. USA EL ID REAL AQUÍ 🔥
+                    )
+                    
+                    mensajes_procesados += 1
+                
+                # === Guardar en Supabase ===
                 supabase.table('mensajes_whatsapp').insert({
-                    'chat_id': msg.get('chatId'),
-                    'chat_nombre': msg.get('chatNombre'),
-                    'contenido': msg.get('contenido'),
-                    'timestamp': msg.get('timestamp'),
-                    'es_mio': msg.get('esMio'),
-                    'tipo': msg.get('tipo', 'texto'),
+                    'usuario_id': USER_ID_REAL, # 6. USA EL ID REAL AQUÍ 🔥
+                    'chat_id': msg_data['chatId'],
+                    'chat_nombre': msg_data['chatNombre'],
+                    'contenido': msg_data['contenido'],
+                    'timestamp': msg_data['timestamp'],
+                    'es_mio': msg_data['esMio'],
+                    'tipo': msg_data['tipo'],
                     'device_id': x_device_id,
                     'sincronizado': True
                 }).execute()
                 
-                mensajes_guardados += 1
-                
-            except Exception as e_insert:
-                print(f"⚠️ Error guardando mensaje individual: {e_insert}")
-                # No detenemos el ciclo, intentamos con el siguiente
+            except Exception as e_msg:
+                print(f"⚠️ Error procesando mensaje individual: {e_msg}")
         
         return {
             "status": "success",
-            "recibidos": len(mensajes_raw),
-            "guardados": mensajes_guardados
+            "usuario": USER_ID_REAL,
+            "mensajes_recibidos": len(mensajes_raw),
+            "mensajes_procesados": mensajes_procesados
         }
-
+        
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error General en Endpoint: {e}")
+        print(f"❌ Error inesperado en Batch: {e}")
         raise HTTPException(500, f"Error interno: {str(e)}")
 
+# main.py - AÑADIR ESTA FUNCIÓN
+
+async def procesar_mensaje_whatsapp_ia(
+    mensaje_id: str,
+    contenido: str,
+    chat_nombre: str,
+    usuario_id: str
+):
+    """
+    Procesa un mensaje de WhatsApp con tu IA existente
+    y genera alertas/tareas automáticamente
+    """
+    try:
+        print(f"🤖 Procesando mensaje de {chat_nombre}: {contenido[:50]}...")
+        
+        # ====== INTEGRACIÓN CON TU IA EXISTENTE ======
+        
+        # PASO 1: Clasificar intención (usando tu función existente)
+        decision = await clasificar_intencion_portero(contenido)
+        
+        print(f"📊 Clasificación: {decision['tipo']} (confianza: {decision.get('confianza', 0)}%)")
+        
+        # PASO 2: Procesar según el tipo
+        
+        if decision['tipo'] == 'VALOR':
+            # Información relevante que debe guardarse
+            print(f"💎 Información de valor detectada")
+            
+            await procesar_informacion_valor(
+                contenido=contenido,
+                decision=decision,
+                usuario_id=usuario_id,
+                origen="whatsapp",
+                metadata={
+                    "chat_nombre": chat_nombre,
+                    "mensaje_id": mensaje_id
+                }
+            )
+        
+        elif decision['tipo'] == 'TAREA':
+            # Tarea o acción pendiente
+            print(f"✅ Tarea detectada")
+            
+            await crear_tarea_directa(
+                descripcion=contenido,
+                usuario_id=usuario_id,
+                metadata={
+                    "chat_nombre": chat_nombre,
+                    "mensaje_id": mensaje_id,
+                    "origen": "whatsapp"
+                }
+            )
+        
+        elif decision['tipo'] == 'PREGUNTA':
+            # Pregunta que puede requerir respuesta
+            print(f"❓ Pregunta detectada")
+            
+            # Opcional: Generar respuesta sugerida
+            respuesta_sugerida = await generar_respuesta_sugerida(
+                pregunta=contenido,
+                contexto=f"Mensaje de {chat_nombre} en WhatsApp"
+            )
+            
+            # Guardar como alerta para que el usuario la vea
+            supabase.table('alertas').insert({
+                'usuario_id': usuario_id,
+                'titulo': f"Pregunta de {chat_nombre}",
+                'descripcion': contenido,
+                'tipo': 'pregunta_whatsapp',
+                'prioridad': 'MEDIA',
+                'metadata': {
+                    'respuesta_sugerida': respuesta_sugerida,
+                    'mensaje_id': mensaje_id,
+                    'chat_nombre': chat_nombre
+                }
+            }).execute()
+        
+        elif decision['tipo'] == 'URGENTE':
+            # Mensaje urgente que requiere atención inmediata
+            print(f"🚨 Mensaje URGENTE detectado")
+            
+            # Crear alerta de alta prioridad
+            supabase.table('alertas').insert({
+                'usuario_id': usuario_id,
+                'titulo': f"⚠️ URGENTE: {chat_nombre}",
+                'descripcion': contenido,
+                'tipo': 'urgente_whatsapp',
+                'prioridad': 'ALTA',
+                'etiqueta': 'URGENTE',
+                'metadata': {
+                    'mensaje_id': mensaje_id,
+                    'chat_nombre': chat_nombre,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            }).execute()
+            
+            # 2. 🔥 ENVIAR NOTIFICACIÓN PUSH (HABILITADO)
+            # Usamos la función 'inteligente' que busca el token en la BD
+            try:
+                enviar_notificacion_inteligente(
+                    usuario_id=usuario_id, 
+                    titulo=f"🚨 URGENTE: {chat_nombre}",
+                    cuerpo=f"{contenido[:100]}..." # Recortamos para que quepa bien
+                )
+                print("📲 Notificación Push enviada al dispositivo")
+            except Exception as e_push:
+                print(f"⚠️ No se pudo enviar Push (pero se guardó la alerta): {e_push}")
+        
+        else:
+            # DESCARTE: No es relevante
+            print(f"🗑️ Mensaje descartado (ruido)")
+        
+        # PASO 3: Actualizar metadata del mensaje en Supabase
+        supabase.table('mensajes_whatsapp').update({
+            'metadata': {
+                'procesado': True,
+                'clasificacion': decision['tipo'],
+                'confianza': decision.get('confianza', 0),
+                'procesado_en': datetime.utcnow().isoformat()
+            }
+        }).eq('id', mensaje_id).execute()
+        
+        print(f"✅ Mensaje procesado exitosamente")
+        
+    except Exception as e:
+        print(f"❌ Error procesando mensaje {mensaje_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# main.py - AÑADIR FUNCIÓN OPCIONAL
+
+async def generar_respuesta_sugerida(pregunta: str, contexto: str) -> str:
+    """
+    Genera una respuesta sugerida usando tu modelo de IA
+    """
+    try:
+        # Usar tu modelo Gemini actual
+        prompt = f"""
+        Contexto: {contexto}
+        
+        Pregunta recibida: "{pregunta}"
+        
+        Por favor, genera una respuesta profesional, concisa y útil.
+        Máximo 2-3 oraciones.
+        """
+        
+        respuesta = model.generate_content(prompt)
+        
+        return respuesta.text.strip()
+        
+    except Exception as e:
+        print(f"Error generando respuesta: {e}")
+        return "No se pudo generar una respuesta automática."
+
+
+# main.py - AÑADIR NUEVO ENDPOINT
+
+@app.get("/nexus/estadisticas/{usuario_id}")
+async def obtener_estadisticas_nexus(usuario_id: str):
+    """
+    Obtiene estadísticas de mensajes de WhatsApp procesados
+    """
+    try:
+        # Total de mensajes
+        total_mensajes = supabase.table('mensajes_whatsapp')\
+            .select('*', count='exact')\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        # Mensajes de hoy
+        hoy = datetime.utcnow().date()
+        mensajes_hoy = supabase.table('mensajes_whatsapp')\
+            .select('*', count='exact')\
+            .eq('usuario_id', usuario_id)\
+            .gte('created_at', hoy.isoformat())\
+            .execute()
+        
+        # Alertas generadas
+        alertas = supabase.table('alertas')\
+            .select('*', count='exact')\
+            .eq('usuario_id', usuario_id)\
+            .eq('tipo', 'urgente_whatsapp')\
+            .execute()
+        
+        # Chats activos
+        chats = supabase.table('mensajes_whatsapp')\
+            .select('chat_nombre')\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        
+        chats_unicos = len(set([msg['chat_nombre'] for msg in chats.data]))
+        
+        # Mensaje más reciente
+        ultimo_mensaje = supabase.table('mensajes_whatsapp')\
+            .select('*')\
+            .eq('usuario_id', usuario_id)\
+            .order('timestamp', desc=True)\
+            .limit(1)\
+            .execute()
+        
+        ultimo_sync = None
+        if ultimo_mensaje.data:
+            ultimo_sync = ultimo_mensaje.data[0]['created_at']
+        
+        return {
+            "total_mensajes": total_mensajes.count or 0,
+            "mensajes_hoy": mensajes_hoy.count or 0,
+            "alertas_generadas": alertas.count or 0,
+            "chats_activos": chats_unicos,
+            "ultimo_sync": ultimo_sync,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"Error obteniendo estadísticas: {e}")
+        raise HTTPException(500, str(e))
 
 @app.get("/nexus/health")
 async def nexus_health():
@@ -1890,7 +2136,7 @@ async def nexus_health():
         "service": "nexus",
         "timestamp": datetime.utcnow().isoformat()
     }
-    
+
 
 if __name__ == "__main__":
     import uvicorn
