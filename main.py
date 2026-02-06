@@ -1881,7 +1881,17 @@ async def sincronizar_batch_nexus(
         print(f"❌ Error General en Endpoint: {e}")
         raise HTTPException(500, f"Error interno: {str(e)}")
 
-        
+
+@app.get("/nexus/health")
+async def nexus_health():
+    """Health check de Nexus"""
+    return {
+        "status": "healthy",
+        "service": "nexus",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
