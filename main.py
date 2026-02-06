@@ -1936,6 +1936,8 @@ async def generar_respuesta_sugerida(pregunta: str, contexto: str) -> str:
 
 # main.py - AÑADIR ESTA FUNCIÓN
 
+# main.py - VERSIÓN CORREGIDA Y COMPATIBLE
+
 async def procesar_mensaje_whatsapp_ia(
     mensaje_id: str,
     contenido: str,
@@ -1943,61 +1945,55 @@ async def procesar_mensaje_whatsapp_ia(
     usuario_id: str
 ):
     """
-    Procesa un mensaje de WhatsApp con tu IA existente
-    y genera alertas/tareas automáticamente
+    Procesa un mensaje de WhatsApp invocando a tus funciones MAESTRAS existentes.
     """
     try:
         print(f"🤖 Procesando mensaje de {chat_nombre}: {contenido[:50]}...")
         
-        # ====== INTEGRACIÓN CON TU IA EXISTENTE ======
-        
-        # PASO 1: Clasificar intención (usando tu función existente)
+        # 1. Clasificar intención (Usamos tu función 'clasificar_intencion_portero')
         decision = await clasificar_intencion_portero(contenido)
         
-        print(f"📊 Clasificación: {decision['tipo']} (confianza: {decision.get('confianza', 0)}%)")
+        tipo = decision.get('tipo', 'BASURA')
+        print(f"📊 Clasificación: {tipo} (confianza: {decision.get('confianza', 0)}%)")
         
-        # PASO 2: Procesar según el tipo
+        # 2. Procesar según el tipo detectado
         
-        if decision['tipo'] == 'VALOR':
-            # Información relevante que debe guardarse
+        if tipo == 'VALOR':
+            # Información relevante (Memoria/Perfilado)
             print(f"💎 Información de valor detectada")
             
+            # 🔥 CORRECCIÓN CRÍTICA: Llamamos con los argumentos EXACTOS de tu función
             await procesar_informacion_valor(
-                contenido=contenido,
-                decision=decision,
+                mensaje=contenido,    # Tu función espera 'mensaje', no 'contenido'
+                clasificacion=decision,
                 usuario_id=usuario_id,
-                origen="whatsapp",
-                metadata={
-                    "chat_nombre": chat_nombre,
-                    "mensaje_id": mensaje_id
-                }
+                origen="whatsapp"
             )
         
-        elif decision['tipo'] == 'TAREA':
+        elif tipo == 'TAREA':
             # Tarea o acción pendiente
             print(f"✅ Tarea detectada")
             
+            # 🔥 CORRECCIÓN CRÍTICA: Llamamos a tu función 'crear_tarea_directa'
+            # Tu función espera (mensaje, usuario_id)
             await crear_tarea_directa(
-                descripcion=contenido,
-                usuario_id=usuario_id,
-                metadata={
-                    "chat_nombre": chat_nombre,
-                    "mensaje_id": mensaje_id,
-                    "origen": "whatsapp"
-                }
+                mensaje=contenido, 
+                usuario_id=usuario_id
             )
         
-        elif decision['tipo'] == 'PREGUNTA':
-            # Pregunta que puede requerir respuesta
+        elif tipo == 'PREGUNTA':
+            # Pregunta que requiere respuesta (Lógica nueva simple)
             print(f"❓ Pregunta detectada")
             
-            # Opcional: Generar respuesta sugerida
-            respuesta_sugerida = await generar_respuesta_sugerida(
-                pregunta=contenido,
-                contexto=f"Mensaje de {chat_nombre} en WhatsApp"
-            )
+            # Si tienes la función de respuesta sugerida, la usamos
+            respuesta_sugerida = ""
+            if 'generar_respuesta_sugerida' in globals():
+                respuesta_sugerida = await generar_respuesta_sugerida(
+                    pregunta=contenido,
+                    contexto=f"Mensaje de {chat_nombre}"
+                )
             
-            # Guardar como alerta para que el usuario la vea
+            # Guardamos la alerta
             supabase.table('alertas').insert({
                 'usuario_id': usuario_id,
                 'titulo': f"Pregunta de {chat_nombre}",
@@ -2010,12 +2006,12 @@ async def procesar_mensaje_whatsapp_ia(
                     'chat_nombre': chat_nombre
                 }
             }).execute()
-        
-        elif decision['tipo'] == 'URGENTE':
-            # Mensaje urgente que requiere atención inmediata
+
+        elif tipo == 'URGENTE':
+            # Urgencia
             print(f"🚨 Mensaje URGENTE detectado")
             
-            # Crear alerta de alta prioridad
+            # 1. Alerta en BD
             supabase.table('alertas').insert({
                 'usuario_id': usuario_id,
                 'titulo': f"⚠️ URGENTE: {chat_nombre}",
@@ -2030,39 +2026,35 @@ async def procesar_mensaje_whatsapp_ia(
                 }
             }).execute()
             
-            # 2. 🔥 ENVIAR NOTIFICACIÓN PUSH (HABILITADO)
-            # Usamos la función 'inteligente' que busca el token en la BD
-            try:
+            # 2. Notificación Push (Si está disponible)
+            if 'enviar_notificacion_inteligente' in globals():
                 enviar_notificacion_inteligente(
                     usuario_id=usuario_id, 
                     titulo=f"🚨 URGENTE: {chat_nombre}",
-                    cuerpo=f"{contenido[:100]}..." # Recortamos para que quepa bien
+                    cuerpo=contenido[:100]
                 )
-                print("📲 Notificación Push enviada al dispositivo")
-            except Exception as e_push:
-                print(f"⚠️ No se pudo enviar Push (pero se guardó la alerta): {e_push}")
         
         else:
-            # DESCARTE: No es relevante
+            # BASURA / RUIDO
             print(f"🗑️ Mensaje descartado (ruido)")
         
-        # PASO 3: Actualizar metadata del mensaje en Supabase
-        supabase.table('mensajes_whatsapp').update({
-            'metadata': {
-                'procesado': True,
-                'clasificacion': decision['tipo'],
-                'confianza': decision.get('confianza', 0),
-                'procesado_en': datetime.utcnow().isoformat()
-            }
-        }).eq('id', mensaje_id).execute()
-        
+        # 3. Marcar mensaje como procesado en la BD
+        # Nota: Usamos un try/catch específico aquí por si el ID es un texto extraño
+        try:
+            supabase.table('mensajes_whatsapp').update({
+                'metadata': {
+                    'procesado': True,
+                    'clasificacion': tipo,
+                    'procesado_en': datetime.utcnow().isoformat()
+                }
+            }).eq('id', mensaje_id).execute()
+        except Exception as e_update:
+            print(f"⚠️ Nota: No se actualizó metadata del mensaje (posible ID legacy): {e_update}")
+
         print(f"✅ Mensaje procesado exitosamente")
         
     except Exception as e:
-        print(f"❌ Error procesando mensaje {mensaje_id}: {e}")
-        import traceback
-        traceback.print_exc()
-
+        print(f"❌ Error general procesando mensaje {mensaje_id}: {e}")
 
 
 # main.py - AÑADIR NUEVO ENDPOINT
