@@ -11,7 +11,10 @@ from gmail_service import GmailService
 from analizador_correos import AnalizadorCorreos
 import gzip
 
-from fastapi import Header, Request, BackgroundTasks
+from faster_whisper import WhisperModel
+import tempfile
+
+from fastapi import Header, Request, BackgroundTasks, Form
 from itertools import groupby
 #import google.generativeai as genai
 #from google.generativeai.types import content_types
@@ -42,6 +45,19 @@ import jwt  # Se mantiene por compatibilidad con el archivo original
 from datetime import datetime, timedelta
 import pytz
 from contexto_extractor import ExtractorContexto, enriquecer_alerta_con_contexto
+
+# ========== WHISPER CONFIG ==========
+
+# Inicializar Whisper (modelo "base" es balance entre velocidad y precisión)
+whisper_model = None
+
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        print("📥 Cargando modelo Whisper...")
+        whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+        print("✅ Modelo Whisper cargado")
+    return whisper_model
 
 
 # 1. CARGA DE SECRETOS
@@ -2179,6 +2195,104 @@ async def nexus_health():
         "timestamp": datetime.utcnow().isoformat()
     }
 
+
+# ========== ENDPOINTS MULTIMEDIA ==========
+
+@app.post("/nexus/transcribir_audio")
+async def transcribir_audio(
+    background_tasks: BackgroundTasks,
+    archivo: UploadFile = File(...),
+    mensaje_id: str = Form(...),   # <--- CORRECCIÓN: Form(...) lee del multipart body
+    chat_nombre: str = Form(...)   # <--- CORRECCIÓN: Form(...) lee del multipart body
+):
+    """
+    Transcribe un audio de WhatsApp usando Whisper
+    """
+    try:
+        print(f"🎤 Recibiendo audio para transcripción: {archivo.filename}")
+        
+        # Guardar archivo temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".opus") as temp_file:
+            contenido = await archivo.read()
+            temp_file.write(contenido)
+            ruta_temp = temp_file.name
+        
+        # Encolar transcripción en background
+        background_tasks.add_task(
+            procesar_transcripcion,
+            ruta_temp,
+            mensaje_id,
+            chat_nombre
+        )
+        
+        return {
+            "status": "encolado",
+            "mensaje_id": mensaje_id,
+            "mensaje": "Transcripción iniciada en background"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error recibiendo audio: {e}")
+        raise HTTPException(500, str(e))
+
+
+async def procesar_transcripcion(
+    ruta_audio: str,
+    mensaje_id: str,
+    chat_nombre: str
+):
+    """
+    Procesa la transcripción de un audio
+    """
+    try:
+        print(f"🔄 Transcribiendo audio: {mensaje_id}")
+        
+        # Obtener modelo Whisper
+        model = get_whisper_model()
+        
+        # Transcribir
+        segments, info = model.transcribe(
+            ruta_audio,
+            language="es",  # Español
+            beam_size=5,     # Balance entre precisión y velocidad
+            vad_filter=True  # Filtrar silencios
+        )
+        
+        # Unir todos los segmentos
+        texto_completo = " ".join([segment.text for segment in segments])
+        
+        print(f"✅ Transcripción completada: '{texto_completo[:50]}...'")
+        print(f"   Idioma detectado: {info.language} (confianza: {info.language_probability:.2%})")
+        
+        # GUARDAR EN SUPABASE
+        # NOTA: No llamamos a IA aquí. Solo guardamos y marcamos procesado_ia = FALSE
+        # para que el 'Cerebro' lo analice después con todo el contexto.
+        supabase.table('mensajes_whatsapp').update({
+            'contenido': f"[AUDIO TRANSCRITO] {texto_completo}", # Actualizamos el contenido visible
+            'metadata': {
+                'es_audio': True,
+                'transcripcion_original': texto_completo,
+                'idioma': info.language,
+                'confianza': info.language_probability
+            },
+            'procesado_ia': False # <--- IMPORTANTE: Esto dispara al Cerebro después
+        }).eq('id', mensaje_id).execute()
+
+        print(f"✅ Audio guardado. Pendiente de análisis por el Cerebro.")
+        
+        
+        
+    except Exception as e:
+        print(f"❌ Error procesando transcripción: {e}")
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        # Limpiar archivo temporal
+        try:
+            os.remove(ruta_audio)
+        except:
+            pass
 
 if __name__ == "__main__":
     import uvicorn
