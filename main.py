@@ -10,10 +10,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from gmail_service import GmailService
 from analizador_correos import AnalizadorCorreos
 import gzip
-
+import pytesseract
+from PIL import Image
+import hashlib
+# --- FIX PARA CHROMADB EN RENDER/LINUX ---
+import sys
+__import__('pysqlite3')
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# -----------------------------------------
 from faster_whisper import WhisperModel
 import tempfile
-
+import chromadb
+from chromadb.config import Settings
+from sentence_transformers import SentenceTransformer
 from fastapi import Header, Request, BackgroundTasks, Form
 from itertools import groupby
 #import google.generativeai as genai
@@ -408,6 +417,33 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+
+
+# ========== CHROMA DB SETUP (OPTIMIZADO) ==========
+# Usamos /tmp, advertencia: se borra al reiniciar el servidor.
+chroma_client = chromadb.PersistentClient(
+    path="/tmp/chroma_data",
+    settings=Settings(anonymized_telemetry=False)
+)
+
+collection_mensajes = chroma_client.get_or_create_collection(
+    name="mensajes_whatsapp",
+    metadata={"description": "Mensajes indexados para Nexus"}
+)
+
+# Variable global para el modelo
+embedding_model = None
+
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is None:
+        print("📥 Cargando modelo de embeddings (LITE)...")
+        # Usamos 'all-MiniLM-L6-v2' que es 5 veces más ligero que el 'paraphrase'
+        # Esto es CRÍTICO para que no explote la RAM de Render
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("✅ Modelo de embeddings cargado")
+    return embedding_model
 
 # ======================================================================
 # 🧠 LÓGICA DE IA (SIN CAMBIOS)
@@ -2016,17 +2052,52 @@ async def activar_cerebro_inteligente(
             if memoria_db.data:
                 contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.')
 
-            # B. PREPARAR TRANSCRIPCIÓN
+            # B. PREPARAR TRANSCRIPCIÓN E INDEXAR EN CHROMA (PASO 5)
             transcripcion = ""
             ids_a_procesar = []
             ultimo_timestamp = ""
             
+            # --- CARGAMOS EL MODELO DE EMBEDDINGS UNA VEZ ---
+            try:
+                emb_model = get_embedding_model() # Asegúrate de tener esto importado
+            except:
+                emb_model = None
+                print("⚠️ No se pudo cargar el modelo de embeddings")
+
             for m in lista_mensajes:
+                # 1. Lógica existente (Transcrpción)
                 autor = "YO" if m['es_mio'] else chat_nombre
-                # Formato: [2023-10-27T10:00:00] YO: Hola
                 transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
                 ids_a_procesar.append(m['id'])
                 ultimo_timestamp = m['timestamp']
+
+                # 👇👇👇 INICIO DEL BLOQUE NUEVO (PASO 5) 👇👇👇
+                # Guardamos cada mensaje individual en el Buscador Semántico
+                try:
+                    # Solo indexamos si el contenido es relevante (> 5 caracteres)
+                    # y si tenemos el modelo cargado
+                    if emb_model and m['contenido'] and len(m['contenido']) > 5:
+                        
+                        # Vectorizamos (Convertimos texto a números)
+                        vector = emb_model.encode([m['contenido']])[0].tolist()
+                        
+                        # Guardamos en ChromaDB
+                        collection_mensajes.add(
+                            ids=[str(m['id'])], # Convertimos a string por seguridad
+                            embeddings=[vector],
+                            documents=[m['contenido']],
+                            metadatas=[{
+                                "chat_nombre": chat_nombre,
+                                "usuario_id": USER_ID_REAL,
+                                "fecha": m['timestamp'],
+                                "es_mio": m['es_mio']
+                            }]
+                        )
+                        # print(f"   📇 Indexado: {m['contenido'][:20]}...") 
+                        # (Comentado para no ensuciar mucho el log)
+                except Exception as e_chroma:
+                    print(f"   ⚠️ Error indexando mensaje {m['id']}: {e_chroma}")
+                # 👆👆👆 FIN DEL BLOQUE NUEVO 👆👆👆
 
             # C. PROMPT PARA GEMINI (Estructura Estricta)
             prompt = f"""
@@ -2293,6 +2364,177 @@ async def procesar_transcripcion(
             os.remove(ruta_audio)
         except:
             pass
+
+@app.post("/nexus/procesar_imagen")
+async def procesar_imagen(
+    background_tasks: BackgroundTasks,
+    archivo: UploadFile = File(...),
+    mensaje_id: str = None,
+    chat_nombre: str = None
+):
+    """
+    Procesa una imagen de WhatsApp con OCR
+    """
+    try:
+        print(f"🖼️ Recibiendo imagen: {archivo.filename}")
+        
+        # Leer contenido
+        contenido = await archivo.read()
+        
+        # Generar hash para detectar duplicados
+        hash_imagen = hashlib.sha256(contenido).hexdigest()
+        
+        # Verificar si ya procesamos esta imagen
+        existente = supabase.table('imagenes_procesadas')\
+            .select('*')\
+            .eq('hash', hash_imagen)\
+            .execute()
+        
+        if existente.data:
+            print(f"♻️ Imagen duplicada: {hash_imagen[:8]}")
+            return {
+                "status": "duplicado",
+                "hash": hash_imagen,
+                "resultado_id": existente.data[0]['id']
+            }
+        
+        # Guardar temporalmente
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            temp_file.write(contenido)
+            ruta_temp = temp_file.name
+        
+        # Encolar procesamiento
+        background_tasks.add_task(
+            procesar_ocr_imagen,
+            ruta_temp,
+            hash_imagen,
+            mensaje_id,
+            chat_nombre
+        )
+        
+        return {
+            "status": "procesando",
+            "hash": hash_imagen,
+            "mensaje_id": mensaje_id
+        }
+        
+    except Exception as e:
+        print(f"❌ Error recibiendo imagen: {e}")
+        raise HTTPException(500, str(e))
+
+
+async def procesar_ocr_imagen(
+    ruta_imagen: str,
+    hash_imagen: str,
+    mensaje_id: str,
+    chat_nombre: str
+):
+    """
+    Extrae texto de una imagen usando OCR
+    """
+    try:
+        print(f"🔍 Procesando OCR: {mensaje_id}")
+        
+        # Abrir imagen
+        imagen = Image.open(ruta_imagen)
+        
+        # Extraer texto con Tesseract
+        texto_extraido = pytesseract.image_to_string(imagen, lang='spa')
+        
+        tiene_texto = len(texto_extraido.strip()) > 10
+        
+        if tiene_texto:
+            print(f"✅ Texto extraído: '{texto_extraido[:50]}...'")
+            
+            # Actualizar mensaje en Supabase
+            supabase.table('mensajes_whatsapp').update({
+                'metadata': {
+                    'texto_ocr': texto_extraido,
+                    'tiene_texto': True,
+                    'procesado_ocr_en': datetime.utcnow().isoformat()
+                }
+            }).eq('id', mensaje_id).execute()
+            
+            # Procesar con IA
+            await procesar_mensaje_whatsapp_ia(
+                mensaje_id=mensaje_id,
+                contenido=texto_extraido,  # ← Usar texto de imagen
+                chat_nombre=chat_nombre,
+                usuario_id='00000000-0000-0000-0000-000000000000'
+            )
+        else:
+            print(f"ℹ️ Imagen sin texto significativo")
+        
+        # Guardar registro de imagen procesada
+        supabase.table('imagenes_procesadas').insert({
+            'hash': hash_imagen,
+            'mensaje_id': mensaje_id,
+            'texto_ocr': texto_extraido if tiene_texto else None,
+            'tiene_texto': tiene_texto
+        }).execute()
+        
+        print(f"✅ Imagen procesada completamente")
+        
+    except Exception as e:
+        print(f"❌ Error procesando OCR: {e}")
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        try:
+            os.remove(ruta_imagen)
+        except:
+            pass
+
+@app.post("/nexus/buscar_semantica")
+async def buscar_semantica(
+    query: str,
+    usuario_id: str, # Recibimos usuario para futuros filtros, aunque Chroma es global por ahora
+    limite: int = 5
+):
+    """
+    Búsqueda semántica inteligente ("¿Cuándo es la cena?")
+    """
+    try:
+        print(f"🔍 Búsqueda semántica: '{query}'")
+        
+        # 1. Obtener modelo y vectorizar la pregunta
+        # Ejecutamos en un thread aparte porque model.encode bloquea el CPU
+        import asyncio
+        loop = asyncio.get_running_loop()
+        model = get_embedding_model()
+        
+        # Generar vector (embedding)
+        query_embedding = await loop.run_in_executor(None, lambda: model.encode([query])[0].tolist())
+        
+        # 2. Consultar ChromaDB
+        resultados = collection_mensajes.query(
+            query_embeddings=[query_embedding],
+            n_results=limite
+        )
+        
+        # 3. Formatear salida limpia
+        respuestas = []
+        if resultados['ids'] and resultados['ids'][0]:
+            for i in range(len(resultados['ids'][0])):
+                respuestas.append({
+                    "mensaje_id": resultados['ids'][0][i],
+                    "contenido": resultados['documents'][0][i],
+                    "metadata": resultados['metadatas'][0][i],
+                    "score": resultados['distances'][0][i] if 'distances' in resultados else 0
+                })
+                
+        return {
+            "query": query,
+            "total_encontrados": len(respuestas),
+            "resultados": respuestas
+        }
+
+    except Exception as e:
+        print(f"❌ Error en búsqueda semántica: {e}")
+        # Retornamos lista vacía en vez de error 500 para no romper la app cliente
+        return {"query": query, "resultados": [], "error": str(e)}
+
 
 if __name__ == "__main__":
     import uvicorn
