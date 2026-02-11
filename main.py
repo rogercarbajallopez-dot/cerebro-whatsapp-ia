@@ -411,6 +411,15 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown() # No olvides apagarlo al salir
 
 app = FastAPI(title="Cerebro WhatsApp IA", lifespan=lifespan)
+# 👇 AGREGA ESTO AQUÍ 👇
+@app.get("/")
+async def root():
+    return {
+        "estado": "en linea",
+        "mensaje": "Cerebro IA operando correctamente 🤖",
+        "version": "v19.0"
+    }
+# 👆 FIN DEL AGREGADO 👆
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 
