@@ -106,6 +106,22 @@ if not firebase_admin._apps:
     else:
         print("⚠️ ALERTA: No se encontró serviceAccountKey.json. Sin notificaciones.")
 
+def serializar_universal(obj):
+    """Convierte fechas de Python a Texto para que la BD no falle."""
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, time):
+        return obj.strftime("%H:%M:%S")
+    if isinstance(obj, timedelta):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: serializar_universal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [serializar_universal(i) for i in obj]
+    return obj
+# ==========================================
+
+
 # Función auxiliar para enviar (Ponerla aquí para que esté disponible globalmente)
 def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
     """
@@ -716,29 +732,6 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
         print(f"❌ Error procesando valor: {e}")
         return {"status": "error", "respuesta": f"Error procesando: {str(e)}"}
 
-def _limpiar_metadata_para_json(metadata: Dict) -> Dict:
-    """Convierte objetos date/datetime en strings"""
-    if not metadata:
-        return {}
-    
-    metadata_limpio = metadata.copy()
-    
-    if 'fecha_hora' in metadata_limpio and metadata_limpio['fecha_hora']:
-        fecha_info = metadata_limpio['fecha_hora']
-        
-        if 'fecha' in fecha_info and fecha_info['fecha']:
-            if hasattr(fecha_info['fecha'], 'isoformat'):
-                fecha_info['fecha'] = fecha_info['fecha'].isoformat()
-            elif not isinstance(fecha_info['fecha'], str):
-                fecha_info['fecha'] = str(fecha_info['fecha'])
-        
-        if 'hora' in fecha_info and fecha_info['hora']:
-            if hasattr(fecha_info['hora'], 'isoformat'):
-                fecha_info['hora'] = fecha_info['hora'].isoformat()
-            elif not isinstance(fecha_info['hora'], str):
-                fecha_info['hora'] = str(fecha_info['hora'])
-    
-    return metadata_limpio
 
 
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
@@ -860,6 +853,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         if 'crear_meet' in [x['tipo'] for x in acciones_para_metadata]:
             contexto['link_meet'] = "https://meet.google.com/new" # Preparamos para lógica legacy
 
+        # [MODIFICACIÓN] 1. Limpiamos los datos para que Supabase no falle
+        metadata_segura = serializar_universal(contexto)
+
         # Preparamos el objeto para BD (Formato B)
         datos_finales = {
             "usuario_id": usuario_id,
@@ -870,11 +866,14 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "estado": "pendiente",
             "etiqueta": etiqueta_principal,
             "fecha_limite": fecha_limite_principal,
-            "metadata": contexto 
+            "metadata": metadata_segura  # <--- AQUÍ USAMOS LA VERSIÓN LIMPIA ✅
         }
 
     except Exception as e_ia:
         print(f"⚠️ IA Falló o formato incorrecto: {e_ia}. Usando Fallback Manual.")
+        # [MODIFICACIÓN] Limpiamos el contexto también en el error
+        metadata_segura = serializar_universal(contexto)
+
         # --- FALLBACK (Seguridad del Código B) ---
         datos_finales = {
             "usuario_id": usuario_id,
@@ -885,7 +884,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
             "estado": "pendiente",
             "etiqueta": "OTROS",
             "fecha_limite": None,
-            "metadata": contexto
+            "metadata": metadata_segura # <--- AQUÍ USAMOS LA VERSIÓN LIMPIA ✅
         }
 
     # --- 4. GUARDADO EN BD (Robustez del Código B) ---
@@ -933,7 +932,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                         "ejecutar_automatico": "true",
                         "titulo": datos_finales['titulo'],
                         "acciones_json": json.dumps(acciones_para_metadata), # 🔥 Enviamos la lista limpia
-                        "metadata": json.dumps(contexto)
+                        "metadata": json.dumps(datos_finales['metadata'])
                     }
                 )
         except Exception as e_push:
