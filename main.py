@@ -403,13 +403,8 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     # --- FIN SCHEDULER ---
     
-    try:
-        nlp = spacy.load("es_core_news_sm")
-    except:
-        print("⚠️ Descargando modelo spaCy...")
-        import spacy.cli
-        spacy.cli.download("es_core_news_sm")
-        nlp = spacy.load("es_core_news_sm")
+    print("🧠 Cargando modelo de lenguaje...")
+    nlp = spacy.load("es_core_news_sm")
     print("✅ NLP Listo")
     yield
     print("👋 Apagando sistema")
