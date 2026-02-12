@@ -491,13 +491,15 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
        - Órdenes directas ("Recuérdame pagar la luz", "Agendar cita").
        - Declaración de compromisos o citas ("Mañana tengo dentista a las 5", "El lunes viajo").
        - CORRECCIONES de tareas anteriores ("No, era a las 4pm", "Cambia la fecha").
+       - Solo si el mensaje NO contiene información personal nueva.
        -> ACCIÓN SISTEMA: CREAR O MODIFICAR ALERTA.
 
-    3. VALOR (Memoria, Perfilado y ANÁLISIS DE ERRORES):
+    3. VALOR (Memoria, Perfilado,Datos Personales O MIXTO y ANÁLISIS DE ERRORES):
        - El usuario cuenta algo de su vida, gustos, familia ("Soy alérgico a las nueces").
+       - MENSAJES MIXTOS: Si el usuario pide una tarea Y ADEMÁS da un dato personal ("Agendar gym y recuerda que mi perro es Toby").
        - RECLAMOS O CONSULTAS TÉCNICAS: "¿Por qué no pudiste agendar?", "¿Qué pasó con la tarea anterior?", "¿Qué sabes de mí?".
        - Conversaciones profundas o archivos adjuntos.
-       -> ACCIÓN SISTEMA: GUARDAR Y ANALIZAR CONTEXTO.
+       -> ACCIÓN SISTEMA: GUARDAR Y ANALIZAR CONTEXTO (Esto también creará la tarea).
 
     Responde SOLO el JSON:
     {{
