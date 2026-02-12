@@ -46,7 +46,7 @@ import re
 import mimetypes
 import spacy
 from supabase import create_client, Client
-from datetime import datetime, date
+from datetime import datetime, date, time, timedelta
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
@@ -654,7 +654,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
                     "tipo": "auto_detectada",
                     "estado": "pendiente",
                     "etiqueta": t.get('etiqueta', 'OTROS'),
-                    "metadata": contexto_tarea  # 🔥 AGREGAR ESTO
+                    "metadata": serializar_universal(contexto_tarea)
                 })
             
             if alertas:
