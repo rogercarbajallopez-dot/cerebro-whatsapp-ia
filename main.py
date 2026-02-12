@@ -774,7 +774,37 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         OBJETIVO: Desglosar el mensaje en una LISTA de acciones técnicas con sus fechas exactas.
 
         INSTRUCCIONES:
-        1. Identifica todas las intenciones: Alarma, Calendario, Meet, Mapa, Llamada, WhatsApp.
+        1. INSTRUCCIONES DE INTENCIÓN (Clasifica con rigor):
+            1.1. ALARMA ("poner_alarma"):
+            - Úsala para despertares o avisos puntuales de reloj.
+            - NO la uses solo por la palabra "recordatorio" si implica un evento largo.
+
+            1.2. CALENDARIO ("agendar_calendario"):
+            - Para eventos, citas, reuniones, entrevistas o bloques de tiempo.
+            - Si menciona "Meet/Videollamada", crea ESTE item Y TAMBIÉN el item de "crear_meet".
+
+            1.3. MEET ("crear_meet"):
+            - EXCLUSIVO para generar enlaces de videollamada (Zoom/Teams/Meet).
+            - Solo si el usuario pide explícitamente video/virtual.
+
+            1.4. MAPA ("ver_ubicacion"):
+            - Siempre que haya una dirección, lugar o intención de ir/llegar.
+
+            1.5. LLAMADA ("llamar"):
+            - Llamadas telefónicas convencionales (App Teléfono) o por Audio WhatsApp.
+
+            1.6. WHATSAPP ("enviar_whatsapp"):
+            - Para enviar MENSAJES de texto/chat a otra persona.
+
+            1.7. PAGOS ("abrir_yape"):
+            - Yape, Plin, Transferencias, Deudas.
+
+            1.8. CONTACTOS ("guardar_contacto"):
+            - Registrar, guardar, agregar o modificar números de agenda.
+
+            1.9. CORREO ("enviar_correo"):
+            - Enviar emails.
+            
         2. Para CADA acción, calcula la "fecha_iso" exacta.
 
         REGLAS DE SALIDA (JSON ARRAY):
