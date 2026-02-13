@@ -538,7 +538,7 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
             model=MODELO_IA,
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
                 temperature=0.0
             )
         )
