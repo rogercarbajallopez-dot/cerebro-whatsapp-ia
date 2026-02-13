@@ -1205,18 +1205,24 @@ async def generar_embedding(texto: str):
 
         # 3. 🔥 LA CORRECCIÓN: Lista de modelos a probar (Prioridad: Moderno -> Clásico)
         # Esto soluciona tu error 404. Si el 004 no existe en tu región, usa el 001.
-        modelos = ["models/text-embedding-004", "models/embedding-001"]
+        modelos = ["text-embedding-004", "embedding-001"]
         
         for modelo_actual in modelos:
             try:
-                # Tu código original para llamar al modelo
+                # Limpiamos el texto para evitar errores de API con vacíos
+                texto_limpio = texto.replace("\n", " ").strip()
+                if not texto_limpio: return []
+
+                # Llamada corregida para google-genai SDK
                 result = gemini_client.models.embed_content(
                     model=modelo_actual,
-                    contents=texto
+                    contents=texto_limpio
                 )
                 
-                # 4. Extraemos y devolvemos la lista de números (Código original)
+                # Validación de respuesta
                 if result.embeddings:
+                    # ✅ ÉXITO: Vector generado correctamente
+                    # print(f"✅ Embedding generado con éxito usando: {modelo_actual}") 
                     return result.embeddings[0].values
             
             except Exception as e_modelo:
