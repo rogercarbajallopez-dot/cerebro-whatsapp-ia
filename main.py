@@ -473,57 +473,80 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
     """
     EL PORTERO: Clasifica la intención para decidir si GUARDAR (BD) o solo RESPONDER.
     """
-    prompt = f"""
-    Eres el cerebro clasificador de un Asistente Personal.
-    Tu única misión es etiquetar el mensaje entrante según su utilidad para la Base de Datos.
-    
-    MENSAJE: "{mensaje}"
-    
-    CATEGORÍAS (Selecciona con precisión):
-    
-    1. BASURA (Chat Efímero / General): 
-       - Saludos ("Hola", "Buenas noches"), agradecimientos ("Gracias").
-       - Preguntas de cultura general, noticias o dudas simples ("¿Qué hora es?", "¿Lloverá hoy?").
-       - Conversación casual sin datos personales.
-       -> ACCIÓN SISTEMA: NO GUARDAR (Responder usando conocimiento general + Internet).
+    # Contexto de fecha (Añadiendo la definición de 'ahora' que faltaba)
+    zona_horaria = pytz.timezone('America/Lima')
+    ahora = datetime.now(zona_horaria).strftime("%Y-%m-%d %H:%M")
 
-    2. TAREA (Acción o Evento Futuro):
-       - Órdenes directas ("Recuérdame pagar la luz", "Agendar cita").
+    prompt = f"""
+    Actúa como el MODERADOR SEMÁNTICO de una IA avanzada.
+    Tu objetivo es analizar la INTENCIÓN PROFUNDA del usuario, no sus palabras literales, y etiquetar el mensaje entrante según su utilidad para la Base de Datos.
+    
+    CONTEXTO:
+    - Fecha actual: {ahora}
+    - El usuario habla con naturalidad (jerga, oraciones complejas, errores).
+
+    MENSAJE DEL USUARIO: "{mensaje}"
+
+    ---------------------------------------------------
+    ANÁLISIS DE CATEGORÍAS (Lógica de Decisión):
+    ---------------------------------------------------
+    
+    1. CONSULTA (Chat Efímero / General / Búsqueda / Conversación): 
+       - CRITERIO: El usuario busca una RESPUESTA INMEDIATA o INTERACCIÓN.
+       - INCLUYE:
+         * Búsquedas ("Búscame si llueve", "Investiga X"). -> Esto es CONSULTA porque quiere el dato YA.
+         * Preguntas de cultura general, noticias o dudas simples ("¿Qué hora es?", "¿Lloverá hoy?").
+         * Recuperación ("¿Recuerdas quién soy?", "¿Qué jugué ayer?"). -> Esto es CONSULTA (RAG).
+         * Saludos ("Hola", "Buenas noches"), agradecimientos ("Gracias").
+       -> ACCIÓN SISTEMA: NO GUARDAR.
+    
+    2. TAREA (Acción o Evento Futuro / Compromiso):
+       - CRITERIO: El usuario necesita que el sistema "haga algo" en el futuro o gestione una agenda.
+       - CLAVE: Implica TIEMPO FUTURO, PRESENTE o GESTIÓN DE ESTADO (borrar, agendar, recordar, avisar, ETC).
+       - Por ejemplo: Órdenes directas ("Recuérdame pagar la luz", "Agendar cita").
        - Declaración de compromisos o citas ("Mañana tengo dentista a las 5", "El lunes viajo").
        - CORRECCIONES de tareas anteriores ("No, era a las 4pm", "Cambia la fecha").
        - Solo si el mensaje NO contiene información personal nueva.
+       - NO es tarea si el usuario pide buscar información para consumirla AHORA MISMO.
        -> ACCIÓN SISTEMA: CREAR O MODIFICAR ALERTA.
-
-    3. VALOR (Memoria, Perfilado,Datos Personales O MIXTO y ANÁLISIS DE ERRORES):
+       
+    3. VALOR (Memoria, Perfilado, Datos Personales O MIXTO y ANÁLISIS DE ERRORES):
+       - CRITERIO: El usuario comparte un dato sobre SU identidad, gustos, salud o vida personal.
        - El usuario cuenta algo de su vida, gustos, familia ("Soy alérgico a las nueces").
+       - OBJETIVO: El sistema debe "aprender" esto para siempre.
        - MENSAJES MIXTOS: Si el usuario pide una tarea Y ADEMÁS da un dato personal ("Agendar gym y recuerda que mi perro es Toby").
        - RECLAMOS O CONSULTAS TÉCNICAS: "¿Por qué no pudiste agendar?", "¿Qué pasó con la tarea anterior?", "¿Qué sabes de mí?".
        - Conversaciones profundas o archivos adjuntos.
-       -> ACCIÓN SISTEMA: GUARDAR Y ANALIZAR CONTEXTO (Esto también creará la tarea).
+       -> ACCIÓN SISTEMA: GUARDAR Y ANALIZAR CONTEXTO.
+    
+    ---------------------------------------------------
+    INSTRUCCIÓN DE SALIDA:
+    Analiza la frase. Si es ambigua, pregúntate: "¿El usuario quiere un dato AHORA (Consulta) o una acción LUEGO (Tarea)?".
 
     Responde SOLO el JSON:
     {{
-        "tipo": "BASURA" | "VALOR" | "TAREA",
+        "tipo": "CONSULTA" | "VALOR" | "TAREA",
         "subtipo": "chat_general | dato_personal | evento_pendiente | reclamo_sistema",
         "urgencia": "ALTA | MEDIA | BAJA"
     }}
     """
     try:
         if not gemini_client:
-            return {"tipo": "BASURA"}
+            return {"tipo": "CONSULTA"}
             
         response = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
+                temperature=0.0
             )
         )
         return json.loads(response.text)
     except:
         # Fallback de seguridad: Si el mensaje es largo o parece una queja, es VALOR.
         es_queja = any(x in mensaje.lower() for x in ["por qué", "qué pasó", "error", "no pudiste"])
-        return {"tipo": "VALOR" if (len(mensaje) > 20 or es_queja) else "BASURA"}
+        return {"tipo": "VALOR" if (len(mensaje) > 20 or es_queja) else "CONSULTA"}
 
 
 async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_id: str, origen: str = "webhook") -> Dict:
@@ -1280,7 +1303,7 @@ async def chat_endpoint(
                  "nuevos_aprendizajes": res.get('aprendizajes', 0) 
              }
              
-        # CASO 3: Chat General / Basura ("Hola", "¿Cómo estás?", "¿Qué tengo pendiente?")
+        # CASO 3: Chat General / CONSULTA ("Hola", "¿Cómo estás?", "¿Qué tengo pendiente?")
         else:
             # Aquí responde dudas usando RAG (Memoria), pero NO guarda el "Hola" en la base de datos
             respuesta = await procesar_consulta_rapida(entrada.mensaje, usuario_id, entrada.modo_profundo)
@@ -1404,7 +1427,7 @@ async def webhook_whatsapp(request: Request):
 
     print(f"📩 WhatsApp: {mensaje}")
     decision = await clasificar_intencion_portero(mensaje)
-    tipo = decision.get('tipo', 'BASURA')
+    tipo = decision.get('tipo', 'CONSULTA')
     
     if tipo == "VALOR":
         await procesar_informacion_valor(mensaje, decision, usuario_id_webhook, "whatsapp_webhook")
