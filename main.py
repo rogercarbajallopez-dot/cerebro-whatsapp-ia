@@ -1144,6 +1144,9 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 
         CONSULTA DEL USUARIO: "{mensaje}"
         
+        [INSTRUCCIONES DE RESPUESTA]
+        1. Responde de forma natural, como un humano eficiente y preciso.
+
         DIRECTRICES DE RESPUESTA:
         1. INTERNET: Si el usuario pregunta por noticias, clima, dólar o datos actuales, USA TU HERRAMIENTA DE BÚSQUEDA (Google Search).
         2. PERSONALIZACIÓN: Usa los datos del PERFIL para adaptar tu respuesta.
@@ -1151,6 +1154,12 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
         4. MEMORIA: Si pregunta "¿Qué me dijo Juan?", busca en MEMORIA PROFUNDA. Si pregunta "¿Qué hice hoy?", busca en MEMORIA RECIENTE.
         5. TONO: Eres un asistente útil. Sé claro y directo.
         6. FILTRO: Si pregunta algo específico del historial, usa los datos de CONTEXTO. Si es una duda general, responde con tu conocimiento base.
+        
+        [REGLAS NEGATIVAS - MUY IMPORTANTE]
+        - NO escribas "Clasificación de tareas".
+        - NO escribas "Resumen".
+        - NO expliques tu proceso de pensamiento.
+        - Solo entrega la respuesta final optimizada y eficiente.
         """
 
         # 4. CONFIGURACIÓN CON GOOGLE SEARCH ✅
@@ -1194,17 +1203,31 @@ async def generar_embedding(texto: str):
             print("⚠️ No hay cliente Gemini disponible para embeddings")
             return []
 
-        # 3. 🔥 LA CORRECCIÓN CLAVE: Usamos .models.embed_content
-        # Tu versión de librería requiere entrar a 'models' primero
-        result = gemini_client.models.embed_content(
-            model="text-embedding-004",
-            contents=texto
-        )
+        # 3. 🔥 LA CORRECCIÓN: Lista de modelos a probar (Prioridad: Moderno -> Clásico)
+        # Esto soluciona tu error 404. Si el 004 no existe en tu región, usa el 001.
+        modelos = ["models/text-embedding-004", "models/embedding-001"]
         
-        # 4. Extraemos y devolvemos la lista de números
-        if result.embeddings:
-            return result.embeddings[0].values
+        for modelo_actual in modelos:
+            try:
+                # Tu código original para llamar al modelo
+                result = gemini_client.models.embed_content(
+                    model=modelo_actual,
+                    contents=texto
+                )
+                
+                # 4. Extraemos y devolvemos la lista de números (Código original)
+                if result.embeddings:
+                    return result.embeddings[0].values
+            
+            except Exception as e_modelo:
+                # Si falla este modelo, solo imprimimos aviso y el bucle prueba el siguiente
+                print(f"⚠️ Aviso: Falló {modelo_actual} ({e_modelo}). Probando siguiente...")
+                continue
+
+        # Si llegamos aquí, fallaron ambos
+        print("❌ Error: No se pudo generar embedding con ningún modelo.")
         return []
+
     except Exception as e:
         print(f"⚠️ Error generando embedding: {e}")
         return None
