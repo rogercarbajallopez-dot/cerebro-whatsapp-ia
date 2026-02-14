@@ -1205,7 +1205,7 @@ async def generar_embedding(texto: str):
 
         # 3. 🔥 LA CORRECCIÓN: Lista de modelos a probar (Prioridad: Moderno -> Clásico)
         # Esto soluciona tu error 404. Si el 004 no existe en tu región, usa el 001.
-        modelos = ["text-embedding-004", "embedding-001"]
+        modelos = ["gemini-embedding-001", "models/gemini-embedding-001"]
         
         for modelo_actual in modelos:
             try:
