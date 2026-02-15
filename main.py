@@ -494,10 +494,13 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
     1. CONSULTA (Chat Efímero / General / Búsqueda / Conversación): 
        - CRITERIO: El usuario busca una RESPUESTA INMEDIATA o INTERACCIÓN.
        - INCLUYE:
+         * Conultas, preguntas, requierimiento de información que estea guardada en la memoria del sitema o base de datos y neceista una respuesta inmediata
+         * toda consulta, solicitud de informacion, pregunta, incio de conversación  debe interpretarse como que el usuario requiere respuesta inmediata 
          * Búsquedas ("Búscame si llueve", "Investiga X"). -> Esto es CONSULTA porque quiere el dato YA.
          * Preguntas de cultura general, noticias o dudas simples ("¿Qué hora es?", "¿Lloverá hoy?").
          * Recuperación ("¿Recuerdas quién soy?", "¿Qué jugué ayer?"). -> Esto es CONSULTA (RAG).
          * Saludos ("Hola", "Buenas noches"), agradecimientos ("Gracias").
+       - Lo que NO INCLUYE son todas las llamadas de accion que no sean consultas, preguntas, busquedas, saludos como por ejejmplo ejecuatr agenadar calendario, programar alarma, pagar, ejecutar recordatorios, acciones que requieren programar un evento y acciona runa tarea.
        -> ACCIÓN SISTEMA: NO GUARDAR.
     
     2. TAREA (Acción o Evento Futuro / Compromiso):
@@ -1029,7 +1032,7 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
     Responde consultas conectando:
     1. PERFIL (Memoria a Largo Plazo: Quién es el usuario).
     2. HISTORIAL (Memoria a Corto/Mediano Plazo: Qué ha pasado).
-    3. TAREAS (Agenda: Qué tiene pendiente).
+    3. CONSULTAS, PREGUNTAS (Agenda: Qué tiene pendiente).
     4. INTERNET (Google Search: Para datos actuales).
     """
     if not supabase: return "Error: No hay conexión a base de datos o IA."
@@ -1308,7 +1311,7 @@ async def chat_endpoint(
     Cerebro Principal:
     1. TAREA -> Agenda con fecha calculada.
     2. VALOR -> Guarda historial y ACTUALIZA PERFIL (Memoria).
-    3. CHAT -> Responde usando contexto, pero no ensucia la BD.
+    3. CONSULTA -> Responde usando contexto, pero no ensucia la BD.
     """
     try:
         # 1. El Portero decide la intención (Igual que antes)
