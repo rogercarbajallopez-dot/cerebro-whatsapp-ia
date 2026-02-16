@@ -292,7 +292,11 @@ class MensajeEntrada(BaseModel):
 
 class ActualizarAlerta(BaseModel):
     estado: Optional[str] = None 
-    etiqueta: Optional[str] = None 
+    etiqueta: Optional[str] = None
+    titulo: Optional[str] = None       # <--- NUEVO
+    descripcion: Optional[str] = None  # <--- NUEVO
+    fecha_limite: Optional[str] = None # <--- NUEVO (Para reagendar)
+    metadata: Optional[Dict[str, Any]] = None 
 
 # --- FUNCIONES DE SOPORTE ---
 def obtener_fecha_contexto():
@@ -1429,16 +1433,20 @@ async def actualizar_alerta(
     if not alerta_existente.data or alerta_existente.data[0]['usuario_id'] != usuario_id:
         raise HTTPException(status_code=403, detail="No tienes permiso para modificar esta alerta")
     
-    # Construir actualización
-    datos_actualizar = {}
-    if body.estado: datos_actualizar['estado'] = body.estado
-    if body.etiqueta: datos_actualizar['etiqueta'] = body.etiqueta
+    # 2. Construcción DINÁMICA de datos (La solución real)
+    # exclude_unset=True hace que solo se incluyan los campos que realmente enviaste desde Flutter
+    datos_actualizar = body.dict(exclude_unset=True)
     
     if not datos_actualizar:
         return {"status": "no_change", "msg": "No se enviaron datos para actualizar"}
 
-    res = supabase.table('alertas').update(datos_actualizar).eq('id', alerta_id).execute()
-    return {"status": "success", "data": res.data}
+    # 3. Guardar en Supabase
+    try:
+        res = supabase.table('alertas').update(datos_actualizar).eq('id', alerta_id).execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        # Importante: Retornar error 400 permite a Flutter saber que algo falló
+        raise HTTPException(status_code=400, detail=str(e))
 
 # 🔥 WEBHOOK WHATSAPP (SIN AUTENTICACIÓN - Público para Twilio)
 @app.post("/webhook")
