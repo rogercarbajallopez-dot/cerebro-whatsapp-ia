@@ -974,7 +974,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
                         meta = curr.data[0].get('metadata')
                         if isinstance(meta, str): meta = json.loads(meta)
                         if fecha_iso: meta['fecha_hora_especifica'] = fecha_iso
-                        payload['metadata'] = json.dumps(meta)
+                        payload['metadata'] = meta
                 except: pass
 
                 supabase.table('alertas').update(payload).eq('id', id_bd).execute()
