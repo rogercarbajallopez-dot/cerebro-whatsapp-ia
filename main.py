@@ -769,9 +769,12 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
 async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     FUSIÓN: Estructura robusta del Código B + Inteligencia de fechas/acciones del Código A.
-    1. Usa el Prompt de Lista (A) para detectar múltiples acciones.
+    1. Usa el Prom5pt de Lista (A) para detectar múltiples acciones.
     2. Mantiene la seguridad de BD y actualización de Meet (B).
     3. Genera una notificación rica con detalles.
+    4. Analiza intención (Crear/Modificar/Completar).
+    5. Actualiza Base de Datos (Memoria).
+    6. Envía COMANDOS SILENCIOSOS al celular para actualizar Alarmas/Calendario (Ejecución).
     """
     
     # --- 1. CONTEXTO TEMPORAL (Base del Código B) ---
@@ -786,6 +789,7 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         descripcion=mensaje
     )
 
+    
     # --- 🔴 INYECCIÓN INTELIGENTE (Del Código A) ---
     # Calculamos una fecha de referencia segura por si el regex falla
     datos_fecha = contexto.get('fecha_hora')
@@ -794,14 +798,47 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     else:
         fecha_referencia = ahora.strftime("%Y-%m-%d")
 
+    # --- 2. OBTENER CONTEXTO REAL (NUEVO: Ojos del sistema) ---
+    # Leemos la BD para saber qué existe antes de decidir.
+    lista_pendientes_txt = "No hay tareas pendientes."
+    try:
+        res_pendientes = supabase.table('alertas')\
+            .select('id, titulo, fecha_limite, metadata')\
+            .eq('usuario_id', usuario_id)\
+            .eq('estado', 'pendiente')\
+            .execute()
+        
+        if res_pendientes.data:
+            # Formateamos incluyendo ID (UUID) y Título para desambiguación de nombres
+            lista_pendientes_txt = "\n".join([
+                f"- ID_REF: {t['id']} | Tarea: {t['titulo']} | Fecha: {t.get('fecha_limite')}" 
+                for t in res_pendientes.data
+            ])
+    except Exception as e:
+        print(f"⚠️ Error leyendo contexto BD: {e}")
+
+    
+
+
+    
     # --- 🔴 PROMPT POTENCIADO (Del Código A - Pide Lista) ---
     prompt = f"""
         Actúa como un Asistente Ejecutivo Experto.
         HOY ES: {fecha_actual}
         FECHA BASE DEL TEXTO: {fecha_referencia}
+        INVENTARIO DE TAREAS PENDIENTES: {lista_pendientes_txt}
         MENSAJE DEL USUARIO: "{mensaje}"
 
-        OBJETIVO: Desglosar el mensaje en una LISTA de acciones técnicas con sus fechas exactas.
+        OBJETIVO: Desglosar el mensaje en una LISTA de acciones técnicas con sus fechas exactas e identificar si el usuario quiere CREAR (nuevo), MODIFICAR (existente) o COMPLETAR (existente)..
+
+        REGLAS DE PRECISIÓN (CRÍTICO):
+        1. COINCIDENCIA DE NOMBRES: Si el usuario pide modificar una "Entrevista con Pablo", y en la lista hay "Pablo Méndez" y "Pablo Margarete":
+           - Si el usuario dijo "Pablo Méndez", ELIGE SOLO ESE ID.
+           - Si el usuario solo dijo "Pablo" y hay ambigüedad, NO ELIJAS NINGUNO (Asume "crear" tarea nueva o error, para no dañar datos).
+        2. MODIFICAR: Cambios de hora/fecha/título y de mas detalles en tareas existentes.
+        3. COMPLETAR: Palabras como , "completado", "hecho", "realizado", "check","listo", "borrar", "ya pasó", "cancelar" y otros terminos similares.
+        4. CREAR: Solo si NO coincide claramente con nada de la lista.
+        5. UUID: Usa el "ID_REF" exacto de la lista para modificar/completar.
 
         INSTRUCCIONES:
         1. INSTRUCCIONES DE INTENCIÓN (Clasifica con rigor):
@@ -840,13 +877,17 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         REGLAS DE SALIDA (JSON ARRAY):
         [
             {{
-                "titulo": "Nombre corto",
-                "descripcion": "Descripción detallada",
-                "tipo_accion": "poner_alarma" | "agendar_calendario" | "crear_meet" | "ver_ubicacion",
-                "prioridad": "ALTA" | "MEDIA",
-                "etiqueta": "NEGOCIO" | "PERSONAL",
-                "fecha_iso": "YYYY-MM-DDTHH:MM:SS" (OBLIGATORIO),
-                "dato_extra": "Link, Dirección o Teléfono"
+                "accion_macro": "crear" | "modificar" | "completar",
+                "id_tarea_bd": "UUID_EXACTO_DE_LA_LISTA" (String, OBLIGATORIO para modificar/completar, null si es crear),
+                "datos": {{
+                    "titulo": "Nombre corto",
+                    "descripcion": "Descripción detallada",
+                    "tipo_accion": "poner_alarma" | "agendar_calendario" | "crear_meet" | "ver_ubicacion",
+                    "prioridad": "ALTA" | "MEDIA",
+                    "etiqueta": "NEGOCIO" | "PERSONAL",
+                    "fecha_iso": "YYYY-MM-DDTHH:MM:SS" (OBLIGATORIO),
+                    "dato_extra": "Link, Dirección o Teléfono"
+                }}
             }}
         ]
         
@@ -878,134 +919,175 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
 
         print(f"🤖 IA detectó {len(lista_acciones)} acciones.")
 
-        # --- 🔴 LÓGICA DE AGREGACIÓN (Del Código A adaptada a B) ---
-        # Necesitamos elegir UNA acción principal para el título de la BD, 
-        # pero guardar TODAS en metadata.
-        
-        titulo_principal = "Nueva Tarea"
-        descripcion_principal = mensaje
-        prioridad_principal = "MEDIA"
-        fecha_limite_principal = None
-        etiqueta_principal = "OTROS"
-        
-        # Procesamos la lista
-        for i, item in enumerate(lista_acciones):
-            # Guardar en lista limpia para metadata
-            acciones_para_metadata.append({
-                "tipo": item.get('tipo_accion'),
-                "titulo": item.get('titulo'),
-                "fecha_hora_especifica": item.get('fecha_iso'),
-                "dato_extra": item.get('dato_extra')
-            })
-
-            # Lógica para elegir quién manda en el título (Prioridad: Calendario > Alarma > Otros)
-            if i == 0 or item.get('tipo_accion') == 'agendar_calendario':
-                titulo_principal = item.get('titulo')
-                descripcion_principal = item.get('descripcion')
-                prioridad_principal = item.get('prioridad')
-                fecha_limite_principal = item.get('fecha_iso')
-                etiqueta_principal = item.get('etiqueta')
-
-        # Si la IA falló en la fecha, fallback seguro
-        if not fecha_limite_principal:
-             fecha_limite_principal = f"{fecha_referencia}T09:00:00"
-
-        # Actualizamos el contexto con la inteligencia nueva
-        contexto['acciones_programadas'] = acciones_para_metadata # 🔥 CLAVE: Aquí viajan los detalles
-        if 'crear_meet' in [x['tipo'] for x in acciones_para_metadata]:
-            contexto['link_meet'] = "https://meet.google.com/new" # Preparamos para lógica legacy
-
-        # [MODIFICACIÓN] 1. Limpiamos los datos para que Supabase no falle
-        metadata_segura = serializar_universal(contexto)
-
-        # Preparamos el objeto para BD (Formato B)
-        datos_finales = {
-            "usuario_id": usuario_id,
-            "titulo": titulo_principal,
-            "descripcion": descripcion_principal,
-            "prioridad": prioridad_principal,
-            "tipo": "manual",
-            "estado": "pendiente",
-            "etiqueta": etiqueta_principal,
-            "fecha_limite": fecha_limite_principal,
-            "metadata": metadata_segura  # <--- AQUÍ USAMOS LA VERSIÓN LIMPIA ✅
-        }
-
-    except Exception as e_ia:
-        print(f"⚠️ IA Falló o formato incorrecto: {e_ia}. Usando Fallback Manual.")
-        # [MODIFICACIÓN] Limpiamos el contexto también en el error
-        metadata_segura = serializar_universal(contexto)
-
-        # --- FALLBACK (Seguridad del Código B) ---
-        datos_finales = {
-            "usuario_id": usuario_id,
-            "titulo": "Recordatorio Rápido",
-            "descripcion": mensaje,
-            "prioridad": "MEDIA",
-            "tipo": "manual",
-            "estado": "pendiente",
-            "etiqueta": "OTROS",
-            "fecha_limite": None,
-            "metadata": metadata_segura # <--- AQUÍ USAMOS LA VERSIÓN LIMPIA ✅
-        }
-
-    # --- 4. GUARDADO EN BD (Robustez del Código B) ---
-    try:
-        res = supabase.table('alertas').insert(datos_finales).execute()
-
-        # --- 🔵 LÓGICA LEGACY: Actualizar Meet (Del Código B) ---
-        # Esta lógica es muy buena, la mantenemos para obtener el link real si se crea
-        has_meet = any(acc['tipo'] == 'crear_meet' for acc in acciones_para_metadata)
-        if res.data and has_meet:
-            try:
-                alerta_id = res.data[0]['id']
-                import asyncio
-                await asyncio.sleep(2) # Esperar al trigger de BD
-                
-                alerta_actualizada = supabase.table('alertas').select('metadata').eq('id', alerta_id).execute()
-                meta_db = alerta_actualizada.data[0].get('metadata', {})
-                
-                if meta_db.get('link_meet') and meta_db['link_meet'] != 'https://meet.google.com/new':
-                    contexto['link_meet'] = meta_db['link_meet']
-                    # Actualizamos también nuestra lista de acciones en memoria
-                    for acc in acciones_para_metadata:
-                        if acc['tipo'] == 'crear_meet':
-                            acc['dato_extra'] = meta_db['link_meet']
-            except Exception as e:
-                print(f"⚠️ No se pudo actualizar link Meet: {e}")
-
-        # --- 5. NOTIFICACIÓN (Fusión: Lógica B con Datos A) ---
+    # Obtenemos Token para notificaciones (Necesario en todos los casos)
+        token_usuario = None
         try:
             user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
-            if user_data.data and user_data.data[0].get('fcm_token'):
-                token = user_data.data[0]['fcm_token']
+            if user_data.data: token_usuario = user_data.data[0].get('fcm_token')
+        except: pass
+
+        resultado_acumulado = ""
+        contexto_final = contexto # Para retornar al final
+
+        # --- BUCLE DE EJECUCIÓN INTELIGENTE ---
+        for item in lista_acciones:
+            macro = item.get('accion_macro', 'crear')
+            datos = item.get('datos', {})
+            id_bd = item.get('id_tarea_bd')
+            
+            # Saneamiento de fecha
+            fecha_iso = datos.get('fecha_iso')
+            if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
+
+            # =================================================================
+            # CASO A: COMPLETAR / ELIMINAR 
+            # =================================================================
+            if macro == 'completar' and id_bd:
+                supabase.table('alertas').update({'estado': 'completado'}).eq('id', id_bd).execute()
                 
-                # Creamos un resumen bonito para el push
-                resumen_acciones = ", ".join([f"📌 {x['titulo']}" for x in acciones_para_metadata])
-                if not resumen_acciones: resumen_acciones = datos_finales['descripcion']
+                if token_usuario:
+                    enviar_push(
+                        token=token_usuario,
+                        titulo="Tarea Completada",
+                        cuerpo=f"Completado: {datos.get('titulo', 'Tarea')}",
+                        data_extra={
+                            "tipo": "SYNC_COMMAND",       
+                            "comando": "ELIMINAR_NATIVO", 
+                            "alerta_id_bd": str(id_bd),   
+                            "titulo": datos.get('titulo', '')
+                        }
+                    )
+                resultado_acumulado += "✅ Tarea marcada como lista. "
 
-                enviar_push(
-                    token=token,
-                    titulo=f"⚡ Agenda: {datos_finales['titulo']}",
-                    cuerpo=f"Detalles: {resumen_acciones}",
-                    data_extra={
-                        "tipo": "TAREA_EJECUTABLE",
-                        "alerta_id": str(res.data[0]['id']) if res.data else "0",
-                        "ejecutar_automatico": "true",
-                        "titulo": datos_finales['titulo'],
-                        "acciones_json": json.dumps(acciones_para_metadata), # 🔥 Enviamos la lista limpia
-                        "metadata": json.dumps(datos_finales['metadata'])
-                    }
-                )
-        except Exception as e_push:
-            print(f"⚠️ Error Push: {e_push}")
+            # =================================================================
+            # CASO B: MODIFICAR 
+            # =================================================================
+            elif macro == 'modificar' and id_bd:
+                payload = {'updated_at': datetime.now().isoformat()}
+                if fecha_iso: payload['fecha_limite'] = fecha_iso
+                if datos.get('titulo'): payload['titulo'] = datos['titulo']
+                
+                # Preservar metadata existente
+                try:
+                    curr = supabase.table('alertas').select('metadata').eq('id', id_bd).execute()
+                    if curr.data:
+                        meta = curr.data[0].get('metadata')
+                        if isinstance(meta, str): meta = json.loads(meta)
+                        if fecha_iso: meta['fecha_hora_especifica'] = fecha_iso
+                        payload['metadata'] = json.dumps(meta)
+                except: pass
 
+                supabase.table('alertas').update(payload).eq('id', id_bd).execute()
+
+                if token_usuario and fecha_iso:
+                    enviar_push(
+                        token=token_usuario,
+                        titulo="Agenda Actualizada",
+                        cuerpo=f"Reprogramado: {datos.get('titulo')}",
+                        data_extra={
+                            "tipo": "SYNC_COMMAND",          
+                            "comando": "REPROGRAMAR_NATIVO", 
+                            "alerta_id_bd": str(id_bd),
+                            "nueva_fecha": fecha_iso,
+                            "nuevo_titulo": datos.get('titulo', ''),
+                            "tipo_accion_nativa": datos.get('tipo_accion', 'poner_alarma')
+                        }
+                    )
+                resultado_acumulado += f"🔄 Reprogramado para {fecha_iso}. "
+
+            # =================================================================
+            # CASO C: CREAR (TU LÓGICA ORIGINAL RESTAURADA)
+            # =================================================================
+            else:
+                # 1. Preparación de variables (Tu código original)
+                acciones_para_metadata = []
+                # Si la IA devolvió una lista en 'crear', la procesamos (compatibilidad)
+                sub_lista = [item] if macro == 'crear' else lista_acciones
+                
+                titulo_principal = datos.get('titulo', 'Nueva Tarea')
+                descripcion_principal = datos.get('descripcion', mensaje)
+                fecha_limite_principal = fecha_iso
+                
+                # Reconstruimos la metadata como en tu original
+                acc_meta = {
+                    "tipo": datos.get('tipo_accion', 'agendar_calendario'),
+                    "titulo": titulo_principal,
+                    "fecha_hora_especifica": fecha_iso,
+                    "dato_extra": datos.get('dato_extra')
+                }
+                acciones_para_metadata.append(acc_meta)
+
+                if not fecha_limite_principal:
+                    fecha_limite_principal = f"{fecha_referencia}T09:00:00"
+
+                contexto['acciones_programadas'] = acciones_para_metadata
+                contexto['fecha_hora_especifica'] = fecha_iso
+                if 'crear_meet' in str(acciones_para_metadata):
+                    contexto['link_meet'] = "https://meet.google.com/new"
+
+                # Limpieza de metadata
+                metadata_segura = serializar_universal(contexto)
+
+                datos_finales = {
+                    "usuario_id": usuario_id,
+                    "titulo": titulo_principal,
+                    "descripcion": descripcion_principal,
+                    "prioridad": datos.get('prioridad', 'MEDIA'),
+                    "tipo": "manual",
+                    "estado": "pendiente",
+                    "etiqueta": datos.get('etiqueta', 'OTROS'),
+                    "fecha_limite": fecha_limite_principal,
+                    "metadata": metadata_segura 
+                }
+
+                # 2. Insertar en BD
+                res = supabase.table('alertas').insert(datos_finales).execute()
+
+                # 3. Lógica Legacy Meet (Tu lógica async original)
+                if res.data and 'crear_meet' in str(acciones_para_metadata):
+                    try:
+                        import asyncio
+                        await asyncio.sleep(2)
+                        recarga = supabase.table('alertas').select('metadata').eq('id', res.data[0]['id']).execute()
+                        if recarga.data:
+                            meta_recargada = recarga.data[0].get('metadata', {})
+                            if isinstance(meta_recargada, dict) and meta_recargada.get('link_meet'):
+                                contexto['link_meet'] = meta_recargada['link_meet']
+                    except: pass
+
+                # 4. PUSH CREACIÓN (TU FORMATO ORIGINAL + CORRECCIÓN METADATA)
+                if token_usuario:
+                    try:
+                        # 🔥 AQUÍ ESTÁ LA CORRECCIÓN CLAVE QUE PEDISTE 🔥
+                        meta_push = datos_finales['metadata']
+                        # Aseguramos que sea string para el push
+                        if isinstance(meta_push, dict): meta_push = json.dumps(meta_push)
+
+                        enviar_push(
+                            token=token_usuario,
+                            titulo=f"⚡ Agenda: {datos_finales['titulo']}",
+                            cuerpo=f"Agendado: {datos_finales['fecha_limite']}",
+                            data_extra={
+                                "tipo": "TAREA_EJECUTABLE",
+                                "alerta_id": str(res.data[0]['id']) if res.data else "0",
+                                "ejecutar_automatico": "true",
+                                "titulo": datos_finales['titulo'],
+                                "acciones_json": json.dumps(acciones_para_metadata),
+                                "metadata": meta_push # ✅ USAMOS LA VERSIÓN LIMPIA DE DATOS_FINALES
+                            }
+                        )
+                    except Exception as e_p: print(f"Error Push Crear: {e_p}")
+
+                resultado_acumulado += f"✅ Agendado: {datos_finales['titulo']}. "
+                contexto_final = contexto
+
+        # Retorno final unificado
         return {
-            "status": "tarea_creada",
-            "respuesta": f"✅ Agendado: {datos_finales['titulo']}\n📅 {len(acciones_para_metadata)} acciones configuradas.",
-            "metadata": contexto,
-            "acciones": acciones_para_metadata # Para que el Front pinte los botones
-        }
+            "status": "procesado",
+            "respuesta": resultado_acumulado,
+            "metadata": contexto_final,
+            "acciones": lista_acciones # Para debug visual
+        }    
 
     # --- 🔵 MANEJO DE ERRORES BD (Robustez del Código B) ---
     except Exception as e_bd:
