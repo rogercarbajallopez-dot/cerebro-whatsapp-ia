@@ -238,36 +238,44 @@ async def obtener_usuario_actual(
         # Capturamos los datos reales de la sesión validada
         user_id = user_response.user.id
         user_email = user_response.user.email  # Capturamos el email también
+        
+        # >>>> CAMBIO 1: EXTRACCIÓN DEL TELÉFONO (Agrega esto aquí) <<<<
+        # Intentamos obtener el teléfono de los metadatos (donde Flutter lo guarda)
+        # o del campo phone directo.
+        user_meta = user_response.user.user_metadata or {}
+        user_telefono = user_meta.get('phone_number') or user_response.user.phone
+        # Limpiamos espacios si existen
+        if user_telefono: user_telefono = str(user_telefono).strip()
 
         # ==============================================================================
         # 2. BLOQUE COMPLEMENTARIO (AUTO-SINCRONIZACIÓN)
         # Objetivo: Solucionar el error de "Foreign Key" sin tocar la lógica del token.
         # ==============================================================================
         try:
-            # Verificamos silenciosamente si este ID ya tiene su "casillero" en la tabla pública
-            # Esto evita el error que tenías al guardar tareas.
-            existe_en_db = supabase.table('usuarios').select('id').eq('id', user_id).execute()
+            # >>>> CAMBIO 2: REEMPLAZO DE LÓGICA (De 'select+insert' a 'upsert') <<<<
             
-            # Si la lista está vacía, significa que el usuario existe en Auth pero no en la BD
-            if not existe_en_db.data:
-                print(f"🔄 Usuario {user_id} validado, pero faltaba en tabla pública. Sincronizando...")
-                
-                # Lo creamos automáticamente para que no vuelva a fallar
-                supabase.table('usuarios').insert({
-                    "id": user_id,
-                    "email": user_email,
-                    # "created_at": datetime.now().isoformat() # Descomenta si tu tabla requiere fecha manual
-                }).execute()
-                print("✅ Usuario sincronizado correctamente.")
+            # Preparamos el paquete de datos a guardar
+            datos_sincronizacion = {
+                "id": user_id,
+                "email": user_email,
+                # "updated_at": datetime.now().isoformat() # Descomenta si tienes esta columna
+            }
+            
+            # Solo agregamos el teléfono al paquete si realmente encontramos uno
+            if user_telefono:
+                datos_sincronizacion["telefono"] = user_telefono
+
+            # EJECUTAMOS LA SOLUCIÓN (UPSERT):
+            # Esto hace: "Si el ID no existe, créalo. Si existe, actualízale el email/teléfono"
+            supabase.table('usuarios').upsert(datos_sincronizacion).execute()
+            
+            # (Opcional) Print para tus logs de depuración
+            # print(f"✅ Usuario {user_id} sincronizado. Tel: {user_telefono}")
                 
         except Exception as e_sync:
             # Si falla este paso extra, NO bloqueamos el acceso. Solo lo registramos.
-            # Así aseguramos que la función principal (autenticar) siempre prevalezca.
             print(f"⚠️ Aviso: La auto-sincronización encontró un detalle: {e_sync}")
         # ==============================================================================
-
-        # 3. RETORNO ORIGINAL
-        return user_id
         
     except HTTPException as he:
         # Re-lanzamos las excepciones HTTP tal cual (para no perder los códigos 401)
@@ -1537,37 +1545,65 @@ async def webhook_whatsapp(request: Request):
     Este endpoint NO requiere autenticación porque lo llama Twilio.
     Usa API Key en lugar de JWT.
     """
+    # --- 1. PREPARACIÓN DE DATOS (Twilio) ---
     form_data = await request.form()
     data = dict(form_data)
     mensaje = data.get('Body', '').strip()
-    
-    # ID Genérico para webhooks (Twilio)
-    usuario_id_webhook = "00000000-0000-0000-0000-000000000000"
+    numero_whatsapp = data.get('From', '').replace('whatsapp:', '') 
     
     if not mensaje: 
         return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
-    print(f"📩 WhatsApp: {mensaje}")
-    decision = await clasificar_intencion_portero(mensaje)
-    tipo = decision.get('tipo', 'CONSULTA')
-    
-    if tipo == "VALOR":
-        await procesar_informacion_valor(mensaje, decision, usuario_id_webhook, "whatsapp_webhook")
-        # --- INICIO DEL AGREGADO ---
-        # Solo notificamos si la IA detectó que es urgente
-        urgencia = decision.get("urgencia", "MEDIA")
-        
-        if urgencia in ["ALTA", "CRITICA", "URGENTE"]:
-            enviar_notificacion_inteligente(
-                usuario_id_webhook, 
-                "🚨 Atención Requerida", 
-                decision.get('resumen', 'Nueva alerta importante')
-            )
-        # --- FIN DEL AGREGADO ---
-    elif tipo == "TAREA":
-        await crear_tarea_directa(mensaje, usuario_id_webhook)
+    # --- 2. GESTIÓN DE USUARIO (TU LÓGICA DE IDENTIDAD) ---
+    # Buscamos el ID real en Supabase basándonos en el teléfono
+    usuario_id_real = "00000000-0000-0000-0000-000000000000" # Default por seguridad
+    try:
+        res_user = supabase.table('usuarios').select('id').eq('telefono', numero_whatsapp).execute()
+        if res_user.data:
+            usuario_id_real = res_user.data[0]['id']
+        else:
+            # Auto-registro si es nuevo
+            nuevo_user = {"telefono": numero_whatsapp, "nombre": data.get('ProfileName', 'Usuario')}
+            res_create = supabase.table('usuarios').insert(nuevo_user).execute()
+            if res_create.data: usuario_id_real = res_create.data[0]['id']
+    except: pass
 
-    return Response(content="<?xml version='1.0' encoding='UTF-8'?><Response></Response>", media_type="application/xml")
+    # --- 3. EL PORTERO (TU FUNCIÓN CLASIFICAR) ---
+    # Aquí llamamos a tu función de clasificación
+    decision = await clasificar_intencion_portero(mensaje)
+    tipo = decision.get('tipo', 'CONSULTA') # Por defecto es consulta si falla
+
+    print(f"🗂️ Tipo: {tipo} | Usuario: {usuario_id_real}")
+    
+    respuesta_final_texto = ""
+
+    # --- 4. DISTRIBUCIÓN (CONECTANDO TUS FUNCIONES) ---
+    
+    if tipo == "TAREA":
+        # CONECTAMOS: crear_tarea_directa
+        # Devuelve un Dict: {"respuesta": "...", "status": "..."}
+        resultado = await crear_tarea_directa(mensaje, usuario_id_real)
+        respuesta_final_texto = resultado.get('respuesta', 'Tarea procesada.')
+
+    elif tipo == "VALOR":
+        # CONECTAMOS: procesar_informacion_valor
+        # Devuelve un Dict: {"respuesta": "...", "status": "..."}
+        resultado = await procesar_informacion_valor(mensaje, decision, usuario_id_real, "whatsapp")
+        respuesta_final_texto = resultado.get('respuesta', 'Información guardada.')
+
+    else: 
+        # CASO: CONSULTA (Chat / Preguntas)
+        # CONECTAMOS: procesar_consulta_rapida (LA QUE FALTABA)
+        # Nota: Tu función devuelve un STRING directo, no un Dict.
+        respuesta_final_texto = await procesar_consulta_rapida(mensaje, usuario_id_real, modo_profundo=False)
+
+    # --- 5. RESPUESTA FINAL (XML TWILIO) ---
+    xml_response = f"""<?xml version='1.0' encoding='UTF-8'?>
+    <Response>
+        <Message>{respuesta_final_texto}</Message>
+    </Response>"""
+    
+    return Response(content=xml_response, media_type="application/xml")
 
 
 # Instancia global del analizador
