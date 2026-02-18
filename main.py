@@ -239,43 +239,48 @@ async def obtener_usuario_actual(
         user_id = user_response.user.id
         user_email = user_response.user.email  # Capturamos el email también
         
-        # >>>> CAMBIO 1: EXTRACCIÓN DEL TELÉFONO (Agrega esto aquí) <<<<
-        # Intentamos obtener el teléfono de los metadatos (donde Flutter lo guarda)
-        # o del campo phone directo.
-        user_meta = user_response.user.user_metadata or {}
-        user_telefono = user_meta.get('phone_number') or user_response.user.phone
-        # Limpiamos espacios si existen
-        if user_telefono: user_telefono = str(user_telefono).strip()
+        # 🔥 NUEVO (Solo agregamos esto): Capturar el teléfono que envía Flutter
+        meta = user_response.user.user_metadata or {}
+        # Flutter lo manda como 'phone_number' dentro de 'data'
+        telefono_user = meta.get('phone_number')
 
         # ==============================================================================
         # 2. BLOQUE COMPLEMENTARIO (AUTO-SINCRONIZACIÓN)
         # Objetivo: Solucionar el error de "Foreign Key" sin tocar la lógica del token.
         # ==============================================================================
         try:
-            # >>>> CAMBIO 2: REEMPLAZO DE LÓGICA (De 'select+insert' a 'upsert') <<<<
+            # Verificamos silenciosamente si este ID ya tiene su "casillero" en la tabla pública
+            # Esto evita el error que tenías al guardar tareas.
+            existe_en_db = supabase.table('usuarios').select('id').eq('id', user_id).execute()
             
-            # Preparamos el paquete de datos a guardar
-            datos_sincronizacion = {
-                "id": user_id,
-                "email": user_email,
-                # "updated_at": datetime.now().isoformat() # Descomenta si tienes esta columna
-            }
-            
-            # Solo agregamos el teléfono al paquete si realmente encontramos uno
-            if user_telefono:
-                datos_sincronizacion["telefono"] = user_telefono
-
-            # EJECUTAMOS LA SOLUCIÓN (UPSERT):
-            # Esto hace: "Si el ID no existe, créalo. Si existe, actualízale el email/teléfono"
-            supabase.table('usuarios').upsert(datos_sincronizacion).execute()
-            
-            # (Opcional) Print para tus logs de depuración
-            # print(f"✅ Usuario {user_id} sincronizado. Tel: {user_telefono}")
+            # Si la lista está vacía, significa que el usuario existe en Auth pero no en la BD
+            if not existe_en_db.data:
+                print(f"🔄 Usuario {user_id} validado, pero faltaba en tabla pública. Sincronizando...")
                 
+                # Lo creamos automáticamente para que no vuelva a fallar
+                supabase.table('usuarios').insert({
+                    "id": user_id,
+                    "email": user_email,
+                    "telefono": telefono_user
+                    # "created_at": datetime.now().isoformat() # Descomenta si tu tabla requiere fecha manual
+                }).execute()
+                print("✅ Usuario sincronizado correctamente.")
+
+            # 🔥 AGREGADO NECESARIO: Si el usuario YA EXISTE (Tu caso), actualizamos el teléfono
+            else:
+                if telefono_user:
+                    supabase.table('usuarios').update({
+                        "telefono": telefono_user
+                    }).eq('id', user_id).execute()
+
         except Exception as e_sync:
             # Si falla este paso extra, NO bloqueamos el acceso. Solo lo registramos.
+            # Así aseguramos que la función principal (autenticar) siempre prevalezca.
             print(f"⚠️ Aviso: La auto-sincronización encontró un detalle: {e_sync}")
         # ==============================================================================
+
+        # 3. RETORNO ORIGINAL
+        return user_id
         
     except HTTPException as he:
         # Re-lanzamos las excepciones HTTP tal cual (para no perder los códigos 401)
@@ -1538,73 +1543,102 @@ async def actualizar_alerta(
         # Importante: Retornar error 400 permite a Flutter saber que algo falló
         raise HTTPException(status_code=400, detail=str(e))
 
-# 🔥 WEBHOOK WHATSAPP (SIN AUTENTICACIÓN - Público para Twilio)
+# 🔥 WEBHOOK WHATSAPP (CON RECONOCIMIENTO BIOMÉTRICO/TELÉFONO)
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request):
     """
-    Este endpoint NO requiere autenticación porque lo llama Twilio.
-    Usa API Key en lugar de JWT.
+    1. Recibe el mensaje de Twilio.
+    2. Extrae el número de teléfono limpio.
+    3. Busca en la BD 'usuarios' a quién pertenece ese número (MATCH).
+    4. Si existe, usa su UUID real. Si no, usa el ID 'Invitado'.
+    5. Procesa la intención y responde.
     """
-    # --- 1. PREPARACIÓN DE DATOS (Twilio) ---
+    # 1. RECIBIR DATOS RAW
     form_data = await request.form()
     data = dict(form_data)
     mensaje = data.get('Body', '').strip()
-    numero_whatsapp = data.get('From', '').replace('whatsapp:', '') 
+    remitente_raw = data.get('From', '') # Llega como 'whatsapp:+51999...'
     
+    # 2. LIMPIEZA DE DATOS (EL MATCH)
+    # Quitamos "whatsapp:" para quedarnos solo con el número (+51...)
+    telefono_usuario = remitente_raw.replace("whatsapp:", "").strip()
+
     if not mensaje: 
         return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
-    # --- 2. GESTIÓN DE USUARIO (TU LÓGICA DE IDENTIDAD) ---
-    # Buscamos el ID real en Supabase basándonos en el teléfono
-    usuario_id_real = "00000000-0000-0000-0000-000000000000" # Default por seguridad
+    print(f"📩 WhatsApp de {telefono_usuario}: {mensaje}")
+
+    # ==============================================================================
+    # 3. IDENTIFICACIÓN DE USUARIO (La Lógica de Vinculación)
+    # ==============================================================================
+    # Por defecto, asumimos que es un desconocido (Invitado)
+    usuario_activo_id = "00000000-0000-0000-0000-000000000000"
+    usuario_nombre = "Invitado" # Para ser amables en la respuesta
+    
     try:
-        res_user = supabase.table('usuarios').select('id').eq('telefono', numero_whatsapp).execute()
-        if res_user.data:
-            usuario_id_real = res_user.data[0]['id']
+        # CONSULTA CLAVE: Buscamos el UUID usando el teléfono como llave
+        res_user = supabase.table('usuarios')\
+            .select('id, nombre')\
+            .eq('telefono', telefono_usuario)\
+            .execute()
+            
+        # Si la lista NO está vacía, ¡HAY MATCH!
+        if res_user.data and len(res_user.data) > 0:
+            usuario_activo_id = res_user.data[0]['id'] # Tomamos el UUID real
+            # Tomamos el nombre si existe, si no, le decimos "Usuario"
+            usuario_nombre = res_user.data[0].get('nombre') or "Usuario"
+            print(f"✅ MATCH EXITOSO: {usuario_nombre} ({usuario_activo_id})")
         else:
-            # Auto-registro si es nuevo
-            nuevo_user = {"telefono": numero_whatsapp, "nombre": data.get('ProfileName', 'Usuario')}
-            res_create = supabase.table('usuarios').insert(nuevo_user).execute()
-            if res_create.data: usuario_id_real = res_create.data[0]['id']
-    except: pass
+            print(f"⚠️ Teléfono {telefono_usuario} no encontrado en BD. Tratando como Invitado.")
+            
+    except Exception as e:
+        print(f"❌ Error en el proceso de match: {e}")
+        # Si falla la BD, seguimos como invitado para no colgar el chat
 
-    # --- 3. EL PORTERO (TU FUNCIÓN CLASIFICAR) ---
-    # Aquí llamamos a tu función de clasificación
+    # ==============================================================================
+    # 4. CEREBRO: CLASIFICACIÓN (Tu lógica original intacta)
+    # ==============================================================================
     decision = await clasificar_intencion_portero(mensaje)
-    tipo = decision.get('tipo', 'CONSULTA') # Por defecto es consulta si falla
+    tipo = decision.get('tipo', 'CONSULTA')
+    respuesta_texto = ""
 
-    print(f"🗂️ Tipo: {tipo} | Usuario: {usuario_id_real}")
-    
-    respuesta_final_texto = ""
+    # ==============================================================================
+    # 5. EJECUCIÓN (Usando el ID que encontramos en el paso 3)
+    # ==============================================================================
+    if tipo == "VALOR":
+        await procesar_informacion_valor(mensaje, decision, usuario_activo_id, "whatsapp_webhook")
+        
+        # Notificación Urgente
+        urgencia = decision.get("urgencia", "MEDIA")
+        if urgencia in ["ALTA", "CRITICA", "URGENTE"]:
+            enviar_notificacion_inteligente(
+                usuario_activo_id, 
+                "🚨 Atención Requerida", 
+                decision.get('resumen', 'Nueva alerta importante')
+            )
+        respuesta_texto = "Recibido. He procesado la información."
 
-    # --- 4. DISTRIBUCIÓN (CONECTANDO TUS FUNCIONES) ---
-    
-    if tipo == "TAREA":
-        # CONECTAMOS: crear_tarea_directa
-        # Devuelve un Dict: {"respuesta": "...", "status": "..."}
-        resultado = await crear_tarea_directa(mensaje, usuario_id_real)
-        respuesta_final_texto = resultado.get('respuesta', 'Tarea procesada.')
-
-    elif tipo == "VALOR":
-        # CONECTAMOS: procesar_informacion_valor
-        # Devuelve un Dict: {"respuesta": "...", "status": "..."}
-        resultado = await procesar_informacion_valor(mensaje, decision, usuario_id_real, "whatsapp")
-        respuesta_final_texto = resultado.get('respuesta', 'Información guardada.')
+    elif tipo == "TAREA":
+        # ¡AQUÍ ES DONDE OCURRE LA MAGIA!
+        # Se guarda la tarea con el ID real, por eso aparece en tu App.
+        await crear_tarea_directa(mensaje, usuario_activo_id)
+        respuesta_texto = f"✅ Listo {usuario_nombre}, tarea agendada."
 
     else: 
-        # CASO: CONSULTA (Chat / Preguntas)
-        # CONECTAMOS: procesar_consulta_rapida (LA QUE FALTABA)
-        # Nota: Tu función devuelve un STRING directo, no un Dict.
-        respuesta_final_texto = await procesar_consulta_rapida(mensaje, usuario_id_real, modo_profundo=False)
+        # TIPO: "CONSULTA" (Chat)
+        print("💬 Chat IA activado...")
+        # Respondemos usando el historial real de ese usuario
+        respuesta_texto = await procesar_consulta_rapida(mensaje, usuario_activo_id, modo_profundo=False)
 
-    # --- 5. RESPUESTA FINAL (XML TWILIO) ---
-    xml_response = f"""<?xml version='1.0' encoding='UTF-8'?>
+    # ==============================================================================
+    # 6. SALIDA XML (Para que le llegue el mensaje al celular)
+    # ==============================================================================
+    xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Message>{respuesta_final_texto}</Message>
+        <Message>{respuesta_texto}</Message>
     </Response>"""
     
     return Response(content=xml_response, media_type="application/xml")
-
 
 # Instancia global del analizador
 analizador_correos = AnalizadorCorreos()
