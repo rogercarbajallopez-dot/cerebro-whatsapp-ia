@@ -1722,7 +1722,7 @@ async def sincronizar_correos(
             'email_gmail': email_gmail,
             'access_token': gmail_token, # Guardamos el token más reciente
             'activo': True,
-            #'updated_at': "now()"
+            'updated_at': "now()"
         }
 
         # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
