@@ -70,24 +70,32 @@ class GmailService:
                     if correo_estructurado:
                         correos_procesados.append(correo_estructurado)
 
-            # 3. 🔥 NUEVO: Crear el objeto Batch
-            batch = self.service.new_batch_http_request(callback=_callback_batch)
-
-            # 4. 🔥 NUEVO: Empaquetar todas las peticiones SIN ejecutarlas aún
-            for mensaje in mensajes:
-                # OJO: Aquí NO ponemos .execute() al final
-                peticion = self.service.users().messages().get(
-                    userId='me', 
-                    id=mensaje['id'], 
-                    format='full'
-                )
-                # Agregamos la petición a la caja (batch)
-                batch.add(peticion)
-
-            print(f"⚡ Ejecutando 1 sola petición Batch para {len(mensajes)} correos...")
+            # 3. 🔥 SOLUCIÓN: Empaquetar en sub-lotes de 10 para evitar el error 429
+            TAMAÑO_LOTE = 10
+            import time # Necesario para la pequeña pausa
             
-            # 5. 🔥 NUEVO: Ejecutar la caja completa (1 sola llamada a internet)
-            batch.execute()
+            print(f"⚡ Ejecutando Batch para {len(mensajes)} correos (En bloques de {TAMAÑO_LOTE})...")
+            
+            # Cortamos la lista de mensajes en pedazos de 10
+            for i in range(0, len(mensajes), TAMAÑO_LOTE):
+                bloque_mensajes = mensajes[i:i + TAMAÑO_LOTE]
+                
+                # Creamos una caja nueva para estos 10
+                batch = self.service.new_batch_http_request(callback=_callback_batch)
+                
+                for mensaje in bloque_mensajes:
+                    peticion = self.service.users().messages().get(
+                        userId='me', 
+                        id=mensaje['id'], 
+                        format='full'
+                    )
+                    batch.add(peticion)
+
+                # Ejecutamos solo esta caja de 10
+                batch.execute()
+                
+                # Pausa minúscula para que la API de Gmail respire entre bloques
+                time.sleep(0.5)
             
             return correos_procesados
         
