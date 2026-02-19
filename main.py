@@ -13,6 +13,8 @@ import gzip
 import pytesseract
 from PIL import Image
 import hashlib
+import httpx
+import asyncio
 # --- FIX PARA CHROMADB EN RENDER/LINUX ---
 import sys
 __import__('pysqlite3')
@@ -1682,31 +1684,31 @@ async def sincronizar_correos(
         # Si llega un código, lo canjeamos por tokens reales antes de seguir
         nuevo_refresh_token = None
         
+        # --- 🔥 BLOQUE DE INTERCAMBIO ASÍNCRONO (CERO BLOQUEOS) ---
         if server_auth_code:
             print(f"🔄 Canjeando código de autorización para: {email_gmail}")
-            try:
-                token_url = "https://oauth2.googleapis.com/token"
-                payload = {
-                    'client_id': GOOGLE_CLIENT_ID,
-                    'client_secret': GOOGLE_CLIENT_SECRET,
-                    'code': server_auth_code,
-                    'grant_type': 'authorization_code',
-                    'redirect_uri': REDIRECT_URI
-                }
-                res = requests.post(token_url, data=payload)
+            token_url = "https://oauth2.googleapis.com/token"
+            payload = {
+                'client_id': GOOGLE_CLIENT_ID,
+                'client_secret': GOOGLE_CLIENT_SECRET,
+                'code': server_auth_code,
+                'grant_type': 'authorization_code',
+                'redirect_uri': REDIRECT_URI
+            }
+            
+            # Usamos httpx para no detener el servidor entero mientras Google responde
+            async with httpx.AsyncClient() as client:
+                res = await client.post(token_url, data=payload)
                 data_google = res.json()
 
-                if 'access_token' in data_google:
-                    # Actualizamos el token que usaremos para la lógica de abajo
-                    gmail_token = data_google['access_token']
-                    nuevo_refresh_token = data_google.get('refresh_token') # El tesoro
-                    print("✅ Token canjeado exitosamente.")
-                else:
-                    print(f"⚠️ Error canjeando token: {data_google}")
-
-            except Exception as e:
-                print(f"❌ Excepción al contactar Google: {e}")
-        # --------------------------------------------------
+            if res.status_code == 200 and 'access_token' in data_google:
+                gmail_token = data_google['access_token']
+                nuevo_refresh_token = data_google.get('refresh_token') # ¡El Tesoro!
+                print(f"✅ Token canjeado exitosamente. Hay Refresh Token: {nuevo_refresh_token is not None}")
+            else:
+                print(f"⚠️ Error canjeando token con Google: {data_google}")
+                # Si falla el canje, abortamos con error claro
+                raise HTTPException(status_code=401, detail="Código Auth inválido o expirado.")
 
         # Validación original (ahora valida el token ya sea que vino directo o del canje)
         if not gmail_token:
@@ -1720,7 +1722,7 @@ async def sincronizar_correos(
             'email_gmail': email_gmail,
             'access_token': gmail_token, # Guardamos el token más reciente
             'activo': True,
-            'updated_at': "now()"
+            #'updated_at': "now()"
         }
 
         # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
@@ -1729,39 +1731,27 @@ async def sincronizar_correos(
         elif body.get('refresh_token'): # Fallback por si viene en el body directo
             datos_cuenta['refresh_token'] = body.get('refresh_token')
 
-        # Guardamos Client ID/Secret si vienen (para uso futuro)
-        datos_cuenta['client_id'] = GOOGLE_CLIENT_ID
-        datos_cuenta['client_secret'] = GOOGLE_CLIENT_SECRET
+        # 🚨 YA NO GUARDAMOS client_id NI client_secret EN ESTA TABLA.
+        
+        def _actualizar_bd():
+            cuenta_exist = supabase.table('cuentas_gmail').select('id').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+            if cuenta_exist.data:
+                cid = cuenta_exist.data[0]['id']
+                supabase.table('cuentas_gmail').update(datos_cuenta).eq('id', cid).execute()
+                return cid
+            else:
+                nueva = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
+                return nueva.data[0]['id'] if nueva.data else None
 
-        # Buscamos si existe para obtener el ID
-        cuenta_existente = supabase.table('cuentas_gmail')\
-            .select('id')\
-            .eq('usuario_id', usuario_id)\
-            .eq('email_gmail', email_gmail)\
-            .execute()
-            
-        if cuenta_existente.data:
-            # SI EXISTE: Actualizamos (UPDATE)
-            cuenta_gmail_id = cuenta_existente.data[0]['id']
-            print(f"🔄 Actualizando tokens de cuenta existente: {email_gmail}")
-            supabase.table('cuentas_gmail')\
-                .update(datos_cuenta)\
-                .eq('id', cuenta_gmail_id)\
-                .execute()
-        else:
-            # NO EXISTE: Insertamos (INSERT)
-            print(f"✨ Creando nueva cuenta Gmail: {email_gmail}")
-            nueva_cuenta = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
-            if nueva_cuenta.data:
-                cuenta_gmail_id = nueva_cuenta.data[0]['id']
-
+        # Ejecutamos la BD sin bloquear FastAPI
+        cuenta_gmail_id = await asyncio.to_thread(_actualizar_bd)
 
         # 3. Inicializar servicio de Gmail
         from gmail_service import GmailService
         gmail = GmailService(access_token=gmail_token)
         
-        # 4. Obtener correos no leídos (ESTO YA LO TIENES, DÉJALO IGUAL)
-        correos_gmail = gmail.obtener_correos_no_leidos(cantidad=50)
+        # Ejecutamos el Batch Request en un hilo para no bloquear
+        correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 50)
         
         if not correos_gmail:
             return {
@@ -1779,13 +1769,11 @@ async def sincronizar_correos(
         # A. Extraemos solo los IDs de los correos que acabamos de bajar
         lista_ids_nuevos = [c['id'] for c in correos_gmail]
 
-        # B. Preguntamos a Supabase: "¿Cuáles de estos IDs ya tengo guardados?"
-        # ⚠️ IMPORTANTE: Asegúrate que la columna en Supabase se llame 'id_correo_gmail'
+        def _buscar_duplicados():
+            return supabase.table('correos_analizados').select('id_correo_gmail').in_('id_correo_gmail', lista_ids_nuevos).execute()
+
         try:
-            existentes_response = supabase.table('correos_analizados')\
-                .select('id_correo_gmail')\
-                .in_('id_correo_gmail', lista_ids_nuevos)\
-                .execute()
+            existentes_response = await asyncio.to_thread(_buscar_duplicados)
             
             # C. Creamos una lista de "placas" que ya conocemos
             ids_ya_procesados = {item['id_correo_gmail'] for item in existentes_response.data}
@@ -1810,15 +1798,11 @@ async def sincronizar_correos(
                 }
             }
             
-        # ==============================================================================
-        # 🔥 FIN DE LA MODIFICACIÓN
-        # ==============================================================================
-        
-        # 5. Obtener datos del usuario (nombre)
-        user_data = supabase.table('usuarios')\
-            .select('nombre, email')\
-            .eq('id', usuario_id)\
-            .execute()
+       # 5. Obtener datos del usuario
+        def _get_usuario():
+            return supabase.table('usuarios').select('nombre, email').eq('id', usuario_id).execute()
+            
+        user_data = await asyncio.to_thread(_get_usuario)
         
         nombre_usuario = ""
         if user_data.data:
@@ -1826,6 +1810,7 @@ async def sincronizar_correos(
             email = user_data.data[0].get('email', '')
             nombre_usuario = nombre if nombre else email.split('@')[0]
         
+       
         # 6. Procesar correos con el analizador inteligente
         resultado = await analizador_correos.procesar_lote_correos(
             correos=correos_a_procesar,
@@ -1838,11 +1823,10 @@ async def sincronizar_correos(
         
         # 7. Enviar notificaciones PUSH (solo correos críticos)
         if resultado.get('correos_criticos'):
+            def _get_fcm():
+                return supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
             try:
-                fcm_data = supabase.table('usuarios')\
-                    .select('fcm_token')\
-                    .eq('id', usuario_id)\
-                    .execute()
+                fcm_data = await asyncio.to_thread(_get_fcm)
                 
                 if fcm_data.data and fcm_data.data[0].get('fcm_token'):
                     token_fcm = fcm_data.data[0]['fcm_token']
@@ -1877,6 +1861,8 @@ async def sincronizar_correos(
             "top_correo": resultado['correos_criticos'][0]['correo']['asunto'] if resultado['correos_criticos'] else None
         }
     
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
         print(f"Error sincronizando correos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
