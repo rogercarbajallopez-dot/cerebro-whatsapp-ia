@@ -11,7 +11,7 @@ import base64
 from typing import List, Dict, Optional
 import re
 from datetime import datetime
-
+import concurrent.futures
 
 class GmailService:
     """
@@ -57,25 +57,37 @@ class GmailService:
             
             if not mensajes:
                 return []
-            
-            # 2. Obtener detalles de cada mensaje
+
             correos_procesados = []
-            
-            for mensaje in mensajes:
-                try:
-                    msg_detail = self.service.users().messages().get(
-                        userId='me',
-                        id=mensaje['id'],
-                        format='full'
-                    ).execute()
-                    
-                    correo_estructurado = self._parsear_mensaje(msg_detail)
+
+            # 2. 🔥 NUEVO: Definir el "Callback" (Qué hacer cuando Google responda el lote)
+            def _callback_batch(request_id, response, exception):
+                if exception is not None:
+                    print(f"⚠️ Error en correo del lote (ID: {request_id}): {exception}")
+                else:
+                    # Si no hay error, parseamos el correo y lo guardamos en la lista
+                    correo_estructurado = self._parsear_mensaje(response)
                     if correo_estructurado:
                         correos_procesados.append(correo_estructurado)
-                
-                except HttpError as e:
-                    print(f"Error obteniendo mensaje {mensaje['id']}: {e}")
-                    continue
+
+            # 3. 🔥 NUEVO: Crear el objeto Batch
+            batch = self.service.new_batch_http_request(callback=_callback_batch)
+
+            # 4. 🔥 NUEVO: Empaquetar todas las peticiones SIN ejecutarlas aún
+            for mensaje in mensajes:
+                # OJO: Aquí NO ponemos .execute() al final
+                peticion = self.service.users().messages().get(
+                    userId='me', 
+                    id=mensaje['id'], 
+                    format='full'
+                )
+                # Agregamos la petición a la caja (batch)
+                batch.add(peticion)
+
+            print(f"⚡ Ejecutando 1 sola petición Batch para {len(mensajes)} correos...")
+            
+            # 5. 🔥 NUEVO: Ejecutar la caja completa (1 sola llamada a internet)
+            batch.execute()
             
             return correos_procesados
         
