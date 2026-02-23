@@ -8,6 +8,8 @@ from fastapi.responses import Response
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from gmail_service import GmailService
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from analizador_correos import AnalizadorCorreos
 import gzip
 import pytesseract
@@ -1683,7 +1685,7 @@ async def sincronizar_correos(
         # --- 🔥 BLOQUE DE INTERCAMBIO DE TOKENS (NUEVO) ---
         # Si llega un código, lo canjeamos por tokens reales antes de seguir
         nuevo_refresh_token = None
-        
+        token_recien_horneado = False # 🔥 NUEVA BANDERA
         # --- 🔥 BLOQUE DE INTERCAMBIO ASÍNCRONO (CERO BLOQUEOS) ---
         if server_auth_code:
             print(f"🔄 Canjeando código de autorización para: {email_gmail}")
@@ -1704,12 +1706,18 @@ async def sincronizar_correos(
             if res.status_code == 200 and 'access_token' in data_google:
                 gmail_token = data_google['access_token']
                 nuevo_refresh_token = data_google.get('refresh_token') # ¡El Tesoro!
+                token_recien_horneado = True # 🔥 LE AVISAMOS AL SISTEMA QUE YA ES FRESCO
                 print(f"✅ Token canjeado exitosamente. Hay Refresh Token: {nuevo_refresh_token is not None}")
             else:
-                print(f"⚠️ Error canjeando token con Google: {data_google}")
-                # Si falla el canje, abortamos con error claro
-                raise HTTPException(status_code=401, detail="Código Auth inválido o expirado.")
-
+                cuenta_previa = await asyncio.to_thread(
+                    lambda: supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                )
+                if cuenta_previa.data and cuenta_previa.data[0].get('refresh_token'):
+                    print("⚠️ Código quemado, pero YA TENEMOS el refresh_token en BD. Ignorando error y continuando el flujo.")
+                else:
+                    # Solo matamos el proceso si el código es inválido Y no tenemos respaldo en la BD.
+                    print(f"⚠️ Error fatal canjeando token: {data_google}")
+                    raise HTTPException(status_code=401, detail=f"Código Auth inválido o expirado. Detalles: {data_google}")
         # Validación original (ahora valida el token ya sea que vino directo o del canje)
         if not gmail_token:
             raise HTTPException(status_code=400, detail="Token de Gmail requerido o fallo en autenticación")
@@ -1728,6 +1736,8 @@ async def sincronizar_correos(
         }
 
         # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
+        if gmail_token:
+            datos_cuenta['access_token'] = gmail_token
         if nuevo_refresh_token:
             datos_cuenta['refresh_token'] = nuevo_refresh_token
         elif body.get('refresh_token'): # Fallback por si viene en el body directo
@@ -1754,9 +1764,45 @@ async def sincronizar_correos(
         # Ejecutamos la BD sin bloquear FastAPI
         cuenta_gmail_id = await asyncio.to_thread(_actualizar_bd)
 
+        # --- 3. MOTOR AUTÓNOMO DE RENOVACIÓN DE TOKENS ---
+        if token_recien_horneado:
+            # Si acabamos de canjear el código con éxito, usamos ese token directamente
+            print("⚡ Usando Access Token recién canjeado (Ahorrando llamada a Google).")
+            gmail_token_fresco = gmail_token
+        else:
+            # Solo si el token viene viejo de Flutter (background), aplicamos la renovación
+            def _obtener_refresh_token():
+                res = supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                if res.data and res.data[0].get('refresh_token'):
+                    return res.data[0]['refresh_token']
+                return None
+
+            refresh_token_db = await asyncio.to_thread(_obtener_refresh_token)
+
+            if not refresh_token_db:
+                print("❌ No hay Refresh Token en la BD. Imposible operar.")
+                raise HTTPException(status_code=401, detail="Debes volver a iniciar sesión con Google (Falta Refresh Token).")
+
+            try:
+                print("🔄 Generando un Access Token 100% fresco desde el Backend...")
+                credenciales = Credentials(
+                    token=None,
+                    refresh_token=refresh_token_db,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=GOOGLE_CLIENT_ID,
+                    client_secret=GOOGLE_CLIENT_SECRET
+                )
+                credenciales.refresh(GoogleAuthRequest())
+                gmail_token_fresco = credenciales.token
+                print("✅ Access Token renovado con éxito por el Backend.")
+            except Exception as e:
+                print(f"❌ Error fatal renovando token con Google: {e}")
+                raise HTTPException(status_code=401, detail="El Refresh Token expiró o fue revocado. Vuelve a loguearte.")
+
+        
         # 3. Inicializar servicio de Gmail
         from gmail_service import GmailService
-        gmail = GmailService(access_token=gmail_token)
+        gmail = GmailService(access_token=gmail_token_fresco)
         
         # Ejecutamos el Batch Request en un hilo para no bloquear
         correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 50)
@@ -1920,6 +1966,9 @@ async def enviar_correo_endpoint(
     """
     Envía un correo usando la cuenta de Gmail del usuario.
     """
+    # --- 🔥 ZONA DE CONFIGURACIÓN ---
+    GOOGLE_CLIENT_ID = "269344577878-gnf64lmpd3hcnlfsl1i5brduqvqq49na.apps.googleusercontent.com"
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
     try:
         body = await request.json()
         
@@ -1928,14 +1977,39 @@ async def enviar_correo_endpoint(
         asunto = body.get('asunto')
         cuerpo = body.get('cuerpo')
         thread_id = body.get('thread_id')  # Para respuestas
-        
-        if not all([gmail_token, destinatario, asunto, cuerpo]):
-            raise HTTPException(status_code=400, detail="Faltan parámetros")
-        
-        # Enviar correo
-        gmail = GmailService(access_token=gmail_token)
-        exito = gmail.enviar_correo(destinatario, asunto, cuerpo, thread_id)
-        
+        email_gmail = body.get('email_gmail')
+        # ✅ NUEVA VALIDACIÓN: Exigimos email_gmail en lugar del token viejo
+        if not all([email_gmail, destinatario, asunto, cuerpo]):
+            raise HTTPException(status_code=400, detail="Faltan parámetros: email_gmail, destinatario, asunto o cuerpo")
+        # --- MOTOR AUTÓNOMO DE RENOVACIÓN DE TOKENS ---
+        def _obtener_refresh_token():
+            res = supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+            if res.data and res.data[0].get('refresh_token'):
+                return res.data[0]['refresh_token']
+            return None
+
+        refresh_token_db = await asyncio.to_thread(_obtener_refresh_token)
+
+        if not refresh_token_db:
+            raise HTTPException(status_code=401, detail="No hay Refresh Token asociado a esta cuenta.")
+
+        try:
+            credenciales = Credentials(
+                token=None,
+                refresh_token=refresh_token_db,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET
+            )
+            credenciales.refresh(GoogleAuthRequest())
+            gmail_token_fresco = credenciales.token
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="El Refresh Token expiró. Vuelve a loguearte.")
+
+        # Enviar correo usando el token recién fabricado
+        from gmail_service import GmailService
+        gmail = GmailService(access_token=gmail_token_fresco)
+        exito = await asyncio.to_thread(gmail.enviar_correo, destinatario, asunto, cuerpo, thread_id)
         if exito:
             return {"status": "success", "mensaje": "Correo enviado"}
         else:
