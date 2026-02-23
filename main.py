@@ -1670,7 +1670,7 @@ async def sincronizar_correos(
         print("❌ ERROR CRÍTICO: No se encontró GOOGLE_CLIENT_SECRET en las variables de entorno.")
         raise HTTPException(status_code=500, detail="Error de configuración del servidor (Secret faltante)")
     # Esta URL no se usa realmente en este flujo post-mensaje, pero es requerida por el protocolo
-    REDIRECT_URI = "postmessage" 
+    REDIRECT_URI = "" 
     # ----------------------------------------
 
     try:
@@ -1716,13 +1716,15 @@ async def sincronizar_correos(
         
         # 2. 🔥 LÓGICA CORREGIDA: Upsert (Insertar o Actualizar)
         cuenta_gmail_id = None
-        
+        # [CIRUGÍA 3]: Generar fecha compatible con PostgreSQL para evitar fallos silenciosos de Supabase.
+        ahora_iso = datetime.now(timezone.utc).isoformat()
+
         datos_cuenta = {
             'usuario_id': usuario_id,
             'email_gmail': email_gmail,
             'access_token': gmail_token, # Guardamos el token más reciente
             'activo': True,
-            'updated_at': "now()"
+            'updated_at': ahora_iso
         }
 
         # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
@@ -1734,14 +1736,20 @@ async def sincronizar_correos(
         # 🚨 YA NO GUARDAMOS client_id NI client_secret EN ESTA TABLA.
         
         def _actualizar_bd():
-            cuenta_exist = supabase.table('cuentas_gmail').select('id').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
-            if cuenta_exist.data:
-                cid = cuenta_exist.data[0]['id']
-                supabase.table('cuentas_gmail').update(datos_cuenta).eq('id', cid).execute()
-                return cid
-            else:
-                nueva = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
-                return nueva.data[0]['id'] if nueva.data else None
+            try:
+                cuenta_exist = supabase.table('cuentas_gmail').select('id').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                if cuenta_exist.data:
+                    cid = cuenta_exist.data[0]['id']
+                    supabase.table('cuentas_gmail').update(datos_cuenta).eq('id', cid).execute()
+                    print(f"✅ BD: Cuenta {email_gmail} actualizada correctamente.")
+                    return cid
+                else:
+                    nueva = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
+                    print(f"✅ BD: Cuenta {email_gmail} insertada correctamente.")
+                    return nueva.data[0]['id'] if nueva.data else None
+            except Exception as e_bd:
+                print(f"❌ Error en Supabase al guardar la cuenta: {e_bd}")
+                raise e_bd
 
         # Ejecutamos la BD sin bloquear FastAPI
         cuenta_gmail_id = await asyncio.to_thread(_actualizar_bd)
