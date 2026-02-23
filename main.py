@@ -48,7 +48,7 @@ import re
 import mimetypes
 import spacy
 from supabase import create_client, Client
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, date, time, timedelta, timezone
 from dotenv import load_dotenv
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
