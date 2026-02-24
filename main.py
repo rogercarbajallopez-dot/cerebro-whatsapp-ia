@@ -1805,7 +1805,7 @@ async def sincronizar_correos(
         gmail = GmailService(access_token=gmail_token_fresco)
         
         # Ejecutamos el Batch Request en un hilo para no bloquear
-        correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 50)
+        correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 15)
         
         if not correos_gmail:
             return {
