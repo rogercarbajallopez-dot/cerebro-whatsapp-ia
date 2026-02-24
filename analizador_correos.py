@@ -10,7 +10,7 @@ import pytz
 import time
 from google.genai import types
 import json
-
+import gc  # 🧹 IMPORTACIÓN DEL RECOLECTOR DE BASURA
 class AnalizadorCorreos:
     """
     Motor de análisis de correos con optimización de costos.
@@ -508,6 +508,15 @@ class AnalizadorCorreos:
         correos_para_ia = []
         for correo in correos:
             estadisticas['procesados'] += 1
+
+            # ✂️ OPTIMIZACIÓN VITAL DE RAM: Recortar antes de guardar en memoria
+            cuerpo_correo = correo.get('cuerpo', '')
+            correo['cuerpo'] = cuerpo_correo[:3000]
+            
+            # Si tienes cuerpo_html, recórtalo drásticamente (el HTML pesa muchísimo)
+            if 'cuerpo_html' in correo and correo['cuerpo_html']:
+                correo['cuerpo_html'] = correo['cuerpo_html'][:3000]
+
             if self.es_spam_obvio(correo) or self.calcular_score_inicial(correo, nombre_usuario) < 30:
                 estadisticas['spam_descartado'] += 1
             else:
@@ -593,6 +602,11 @@ class AnalizadorCorreos:
                 
             import asyncio
             await asyncio.sleep(5)
+            # 🧹 LIBERAR RAM DESPUÉS DE CADA LOTE PROFUNDO
+            del lote_prof_actual
+            del datos_para_profundo
+            del resultados_profundos
+            gc.collect()
 
         # 👉 TUS PRINTS ORIGINALES RESTAURADOS AQUÍ:
         print(f"✅ Lote completado. Procesados: {estadisticas['procesados']} | Alta prioridad: {estadisticas['accion_alta']}")
