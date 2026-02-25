@@ -67,40 +67,31 @@ class GmailService:
             
             import concurrent.futures
 
-            # A. Definimos la tarea aislada que hará cada "drone" para un solo correo
-            def _extraer_y_parsear(mensaje_meta):
+            # SOLUCIÓN: Iteración secuencial. Evita la corrupción de memoria de httplib2.
+            for mensaje in mensajes:
                 try:
-                    # num_retries=3 es vital: Si Google falla por 1 segundo, reintenta solo
+                    # num_retries=3 sigue siendo vital aquí
                     msg_detail = self.service.users().messages().get(
                         userId='me', 
-                        id=mensaje_meta['id'], 
+                        id=mensaje['id'], 
                         format='full'
                     ).execute(num_retries=3)
                     
-                    # Usamos TU función de parseo original intacta
-                    return self._parsear_mensaje(msg_detail)
+                    correo_parseado = self._parsear_mensaje(msg_detail)
+                    if correo_parseado:
+                        correos_procesados.append(correo_parseado)
                 
                 except Exception as e:
-                    # Si falla 1 correo, lo reportamos pero NO congelamos la aplicación
-                    print(f"⚠️ Aviso: Error en correo individual {mensaje_meta['id']}: {e}")
-                    return None
-
-            # B. Lanzamos hasta 5 hilos al mismo tiempo (Balance ideal RAM/Velocidad)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # El map ejecuta la tarea para todos los IDs y espera que todos terminen
-                resultados_paralelos = list(executor.map(_extraer_y_parsear, mensajes))
-            
-            # C. Limpiamos la lista quitando los 'None' de los correos que pudieron fallar
-            correos_procesados = [c for c in resultados_paralelos if c is not None]
-            
-            # ==========================================================
-            # 🔥 FIN DE CIRUGÍA 🔥
-            # ==========================================================
+                    print(f"⚠️ Aviso: Error en correo individual {mensaje['id']}: {e}")
+                    continue # Continúa con el siguiente correo sin matar el proceso
 
             return correos_procesados
         
         except HttpError as error:
             print(f'Error obteniendo correos: {error}')
+            return []
+        except Exception as general_error:
+            print(f'❌ Error Crítico obteniendo correos: {general_error}')
             return []
     
     def obtener_correos_todos(self, cantidad: int = 500) -> List[Dict]:
