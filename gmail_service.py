@@ -28,7 +28,7 @@ class GmailService:
         self.credentials = Credentials(token=access_token)
         self.service = build('gmail', 'v1', credentials=self.credentials)
     
-    def obtener_correos_no_leidos(self, cantidad: int = 50) -> List[Dict]:
+    def obtener_correos_no_leidos(self, cantidad: int = 15) -> List[Dict]:
         """
         Obtiene los últimos correos no leídos.
         
@@ -60,43 +60,43 @@ class GmailService:
 
             correos_procesados = []
 
-            # 2. 🔥 NUEVO: Definir el "Callback" (Qué hacer cuando Google responda el lote)
-            def _callback_batch(request_id, response, exception):
-                if exception is not None:
-                    print(f"⚠️ Error en correo del lote (ID: {request_id}): {exception}")
-                else:
-                    # Si no hay error, parseamos el correo y lo guardamos en la lista
-                    correo_estructurado = self._parsear_mensaje(response)
-                    if correo_estructurado:
-                        correos_procesados.append(correo_estructurado)
+            # ==========================================================
+            # 🔥 INICIO DE CIRUGÍA: Enjambre Concurrente (Reemplaza al Batch) 🔥
+            # ==========================================================
+            print(f"⚡ Extrayendo {len(mensajes)} correos en paralelo (Enjambre seguro)...")
+            
+            import concurrent.futures
 
-            # 3. 🔥 SOLUCIÓN: Empaquetar en sub-lotes de 10 para evitar el error 429
-            TAMAÑO_LOTE = 10
-            import time # Necesario para la pequeña pausa
-            
-            print(f"⚡ Ejecutando Batch para {len(mensajes)} correos (En bloques de {TAMAÑO_LOTE})...")
-            
-            # Cortamos la lista de mensajes en pedazos de 10
-            for i in range(0, len(mensajes), TAMAÑO_LOTE):
-                bloque_mensajes = mensajes[i:i + TAMAÑO_LOTE]
-                
-                # Creamos una caja nueva para estos 10
-                batch = self.service.new_batch_http_request(callback=_callback_batch)
-                
-                for mensaje in bloque_mensajes:
-                    peticion = self.service.users().messages().get(
+            # A. Definimos la tarea aislada que hará cada "drone" para un solo correo
+            def _extraer_y_parsear(mensaje_meta):
+                try:
+                    # num_retries=3 es vital: Si Google falla por 1 segundo, reintenta solo
+                    msg_detail = self.service.users().messages().get(
                         userId='me', 
-                        id=mensaje['id'], 
+                        id=mensaje_meta['id'], 
                         format='full'
-                    )
-                    batch.add(peticion)
-
-                # Ejecutamos solo esta caja de 10
-                batch.execute()
+                    ).execute(num_retries=3)
+                    
+                    # Usamos TU función de parseo original intacta
+                    return self._parsear_mensaje(msg_detail)
                 
-                # Pausa minúscula para que la API de Gmail respire entre bloques
-                time.sleep(0.5)
+                except Exception as e:
+                    # Si falla 1 correo, lo reportamos pero NO congelamos la aplicación
+                    print(f"⚠️ Aviso: Error en correo individual {mensaje_meta['id']}: {e}")
+                    return None
+
+            # B. Lanzamos hasta 5 hilos al mismo tiempo (Balance ideal RAM/Velocidad)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # El map ejecuta la tarea para todos los IDs y espera que todos terminen
+                resultados_paralelos = list(executor.map(_extraer_y_parsear, mensajes))
             
+            # C. Limpiamos la lista quitando los 'None' de los correos que pudieron fallar
+            correos_procesados = [c for c in resultados_paralelos if c is not None]
+            
+            # ==========================================================
+            # 🔥 FIN DE CIRUGÍA 🔥
+            # ==========================================================
+
             return correos_procesados
         
         except HttpError as error:
