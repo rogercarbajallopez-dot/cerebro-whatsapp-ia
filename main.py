@@ -1400,6 +1400,284 @@ def limpiar_json_gemini(texto_sucio: str) -> dict:
         print(f"⚠️ Error limpiando JSON: {e}")
         # Retornamos una estructura vacía segura en caso de error fatal
         return {"nuevo_resumen": "Error procesando resumen.", "tareas": [], "datos_clave": []}
+
+
+
+
+
+async def ejecutar_logica_sincronizacion(
+    usuario_id: str, 
+    email_gmail: str, 
+    server_auth_code: str = None, 
+    gmail_token: str = None,
+    gmail_refresh_token: str = None
+):
+    
+    """
+    Sincroniza correos desde Gmail y los vincula con la cuenta correcta.
+    Ahora soporta múltiples cuentas Gmail por usuario.
+    """
+    if not gemini_client:
+        raise HTTPException(status_code=500, detail="IA no disponible")
+    
+    # --- 🔥 ZONA DE CONFIGURACIÓN (NUEVO) ---
+    # Asegúrate que estos coincidan con tu Google Cloud Console y tu Flutter
+    GOOGLE_CLIENT_ID = "269344577878-gnf64lmpd3hcnlfsl1i5brduqvqq49na.apps.googleusercontent.com"
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET") # <--- ⚠️ PEGA TU SECRET AQUÍ (GOCSPX-...)
+    # Validación de seguridad para que no falle silenciosamente
+    if not GOOGLE_CLIENT_SECRET:
+        print("❌ ERROR CRÍTICO: No se encontró GOOGLE_CLIENT_SECRET en las variables de entorno.")
+        raise HTTPException(status_code=500, detail="Error de configuración del servidor (Secret faltante)")
+    # Esta URL no se usa realmente en este flujo post-mensaje, pero es requerida por el protocolo
+    REDIRECT_URI = "" 
+    # ----------------------------------------
+
+    try:
+        
+        
+        nuevo_refresh_token = None
+        token_recien_horneado = False # 🔥 NUEVA BANDERA
+        # --- 🔥 BLOQUE DE INTERCAMBIO ASÍNCRONO (CERO BLOQUEOS) ---
+        if server_auth_code:
+            print(f"🔄 Canjeando código de autorización para: {email_gmail}")
+            token_url = "https://oauth2.googleapis.com/token"
+            payload = {
+                'client_id': GOOGLE_CLIENT_ID,
+                'client_secret': GOOGLE_CLIENT_SECRET,
+                'code': server_auth_code,
+                'grant_type': 'authorization_code',
+                'redirect_uri': REDIRECT_URI
+            }
+            
+            # Usamos httpx para no detener el servidor entero mientras Google responde
+            async with httpx.AsyncClient() as client:
+                res = await client.post(token_url, data=payload)
+                data_google = res.json()
+
+            if res.status_code == 200 and 'access_token' in data_google:
+                gmail_token = data_google['access_token']
+                nuevo_refresh_token = data_google.get('refresh_token') # ¡El Tesoro!
+                token_recien_horneado = True # 🔥 LE AVISAMOS AL SISTEMA QUE YA ES FRESCO
+                print(f"✅ Token canjeado exitosamente. Hay Refresh Token: {nuevo_refresh_token is not None}")
+            else:
+                cuenta_previa = await asyncio.to_thread(
+                    lambda: supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                )
+                if cuenta_previa.data and cuenta_previa.data[0].get('refresh_token'):
+                    print("⚠️ Código quemado, pero YA TENEMOS el refresh_token en BD. Ignorando error y continuando el flujo.")
+                else:
+                    # Solo matamos el proceso si el código es inválido Y no tenemos respaldo en la BD.
+                    print(f"⚠️ Error fatal canjeando token: {data_google}")
+                    raise HTTPException(status_code=401, detail=f"Código Auth inválido o expirado. Detalles: {data_google}")
+        
+        # [CIRUGÍA 3]: Generar fecha compatible con PostgreSQL para evitar fallos silenciosos de Supabase.
+        ahora_iso = datetime.now(timezone.utc).isoformat()
+
+        datos_cuenta = {
+            'usuario_id': usuario_id,
+            'email_gmail': email_gmail,
+            'access_token': gmail_token, # Guardamos el token más reciente
+            'activo': True,
+            'updated_at': ahora_iso
+        }
+
+        # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
+        if gmail_token:
+            datos_cuenta['access_token'] = gmail_token
+        if nuevo_refresh_token:
+            datos_cuenta['refresh_token'] = nuevo_refresh_token
+        elif gmail_refresh_token: # Fallback por si viene en el body directo
+            datos_cuenta['refresh_token'] = gmail_refresh_token
+
+        # 🚨 YA NO GUARDAMOS client_id NI client_secret EN ESTA TABLA.
+        
+        def _actualizar_bd():
+            try:
+                cuenta_exist = supabase.table('cuentas_gmail').select('id').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                if cuenta_exist.data:
+                    cid = cuenta_exist.data[0]['id']
+                    supabase.table('cuentas_gmail').update(datos_cuenta).eq('id', cid).execute()
+                    print(f"✅ BD: Cuenta {email_gmail} actualizada correctamente.")
+                    return cid
+                else:
+                    nueva = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
+                    print(f"✅ BD: Cuenta {email_gmail} insertada correctamente.")
+                    return nueva.data[0]['id'] if nueva.data else None
+            except Exception as e_bd:
+                print(f"❌ Error en Supabase al guardar la cuenta: {e_bd}")
+                raise e_bd
+
+        # Ejecutamos la BD sin bloquear FastAPI
+        cuenta_gmail_id = await asyncio.to_thread(_actualizar_bd)
+
+        # --- 3. MOTOR AUTÓNOMO DE RENOVACIÓN DE TOKENS ---
+        if token_recien_horneado:
+            # Si acabamos de canjear el código con éxito, usamos ese token directamente
+            print("⚡ Usando Access Token recién canjeado (Ahorrando llamada a Google).")
+            gmail_token_fresco = gmail_token
+        else:
+            # Solo si el token viene viejo de Flutter (background), aplicamos la renovación
+            def _obtener_refresh_token():
+                res = supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
+                if res.data and res.data[0].get('refresh_token'):
+                    return res.data[0]['refresh_token']
+                return None
+
+            refresh_token_db = await asyncio.to_thread(_obtener_refresh_token)
+
+            if not refresh_token_db:
+                print("❌ No hay Refresh Token en la BD. Imposible operar.")
+                raise HTTPException(status_code=401, detail="Debes volver a iniciar sesión con Google (Falta Refresh Token).")
+
+            try:
+                print("🔄 Generando un Access Token 100% fresco desde el Backend...")
+                credenciales = Credentials(
+                    token=None,
+                    refresh_token=refresh_token_db,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=GOOGLE_CLIENT_ID,
+                    client_secret=GOOGLE_CLIENT_SECRET
+                )
+                credenciales.refresh(GoogleAuthRequest())
+                gmail_token_fresco = credenciales.token
+                print("✅ Access Token renovado con éxito por el Backend.")
+            except Exception as e:
+                print(f"❌ Error fatal renovando token con Google: {e}")
+                raise HTTPException(status_code=401, detail="El Refresh Token expiró o fue revocado. Vuelve a loguearte.")
+
+        
+        # 3. Inicializar servicio de Gmail
+        from gmail_service import GmailService
+        gmail = GmailService(access_token=gmail_token_fresco)
+        
+        # Ejecutamos el Batch Request en un hilo para no bloquear
+        correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 15)
+        
+        if not correos_gmail:
+            return {
+                "status": "success",
+                "mensaje": "No hay correos nuevos en Gmail",
+                "estadisticas": {"procesados": 0}
+            }
+
+        # ==============================================================================
+        # 🔥 INICIO DE LA MODIFICACIÓN (FILTRO DE IDEMPOTENCIA)
+        # ==============================================================================
+        
+        print(f"📥 Gmail devolvió {len(correos_gmail)} correos candidatos. Verificando duplicados...")
+
+        # A. Extraemos solo los IDs de los correos que acabamos de bajar
+        lista_ids_nuevos = [c['id'] for c in correos_gmail]
+
+        def _buscar_duplicados():
+            return supabase.table('correos_analizados').select('id_correo_gmail').in_('id_correo_gmail', lista_ids_nuevos).execute()
+
+        try:
+            existentes_response = await asyncio.to_thread(_buscar_duplicados)
+            
+            # C. Creamos una lista de "placas" que ya conocemos
+            ids_ya_procesados = {item['id_correo_gmail'] for item in (existentes_response.data or [])}
+            
+        except Exception as e:
+            print(f"⚠️ Advertencia: No se pudo verificar duplicados en Supabase ({e}). Se procesarán todos.")
+            ids_ya_procesados = set()
+
+        # D. EL FILTRO: Solo dejamos pasar los que NO están en la lista de procesados
+        correos_a_procesar = [c for c in correos_gmail if c['id'] not in ids_ya_procesados]
+
+        print(f"🛡️ Filtro aplicado: {len(ids_ya_procesados)} descartados. {len(correos_a_procesar)} irán a la IA.")
+
+        # E. Si después del filtro no queda nada, terminamos aquí para no gastar dinero ni tiempo
+        if not correos_a_procesar:
+             return {
+                "status": "success",
+                "mensaje": "Todos los correos recientes ya habían sido analizados previamente.",
+                "estadisticas": {
+                    "procesados": 0, 
+                    "omitidos_por_duplicidad": len(ids_ya_procesados)
+                }
+            }
+            
+       # 5. Obtener datos del usuario
+        def _get_usuario():
+            return supabase.table('usuarios').select('nombre, email').eq('id', usuario_id).execute()
+            
+        user_data = await asyncio.to_thread(_get_usuario)
+        
+        nombre_usuario = ""
+        if user_data.data:
+            nombre = user_data.data[0].get('nombre', '')
+            email = user_data.data[0].get('email', '')
+            nombre_usuario = nombre if nombre else email.split('@')[0]
+        
+       
+        # 6. Procesar correos con el analizador inteligente
+        resultado = await analizador_correos.procesar_lote_correos(
+            correos=correos_a_procesar,
+            usuario_id=usuario_id,
+            gemini_client=gemini_client,
+            supabase_client=supabase,
+            nombre_usuario=nombre_usuario,
+            cuenta_gmail_id=cuenta_gmail_id  # 🔥 NUEVO: Pasar ID de cuenta
+        )
+        
+        # 7. Enviar notificaciones PUSH (solo correos críticos)
+        if resultado.get('correos_criticos'):
+            def _get_fcm():
+                return supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            try:
+                fcm_data = await asyncio.to_thread(_get_fcm)
+                
+                if fcm_data.data and fcm_data.data[0].get('fcm_token'):
+                    token_fcm = fcm_data.data[0]['fcm_token']
+                    correo_top = resultado['correos_criticos'][0]
+                    
+                    enviar_push(
+                        token=token_fcm,
+                        titulo=f"📧 Correo Urgente: {correo_top['correo']['asunto'][:50]}...",
+                        cuerpo=f"De: {correo_top['correo']['de']}\n{correo_top['clasificacion']['resumen_corto']}",
+                        data_extra={
+                            "tipo": "CORREO_URGENTE",
+                            "correo_id": correo_top['correo']['id'],
+                            "ir_a": "correos"
+                        }
+                    )
+            except Exception as e_notif:
+                print(f"⚠️ Error enviando notificación: {e_notif}")
+        
+        # 8. Retornar estadísticas
+        return {
+            "status": "success",
+            "mensaje": f"Analizados {resultado['procesados']} correos de {email_gmail or 'cuenta desconocida'}",
+            "email_cuenta": email_gmail,
+            "estadisticas": {
+                "procesados": resultado['procesados'],
+                "spam_descartado": resultado['spam_descartado'],
+                "baja_prioridad": resultado['accion_baja'],
+                "media_prioridad": resultado['accion_media'],
+                "alta_prioridad": resultado['accion_alta']
+            },
+            "correos_importantes": len(resultado['correos_criticos']),
+            "top_correo": resultado['correos_criticos'][0]['correo']['asunto'] if resultado['correos_criticos'] else None
+        }
+    
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        print(f"Error sincronizando correos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
+
+
+
+
+
+
+
 # ==============================================================================
 # ======================================================================
 # 🚀 ENDPOINTS API (ACTUALIZADOS CON AUTH)
@@ -1656,307 +1934,23 @@ async def sincronizar_correos(
     request: Request,
     usuario_id: str = Depends(obtener_usuario_actual)
 ):
-    """
-    Sincroniza correos desde Gmail y los vincula con la cuenta correcta.
-    Ahora soporta múltiples cuentas Gmail por usuario.
-    """
-    if not gemini_client:
-        raise HTTPException(status_code=500, detail="IA no disponible")
+    body = await request.json()
     
-    # --- 🔥 ZONA DE CONFIGURACIÓN (NUEVO) ---
-    # Asegúrate que estos coincidan con tu Google Cloud Console y tu Flutter
-    GOOGLE_CLIENT_ID = "269344577878-gnf64lmpd3hcnlfsl1i5brduqvqq49na.apps.googleusercontent.com"
-    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET") # <--- ⚠️ PEGA TU SECRET AQUÍ (GOCSPX-...)
-    # Validación de seguridad para que no falle silenciosamente
-    if not GOOGLE_CLIENT_SECRET:
-        print("❌ ERROR CRÍTICO: No se encontró GOOGLE_CLIENT_SECRET en las variables de entorno.")
-        raise HTTPException(status_code=500, detail="Error de configuración del servidor (Secret faltante)")
-    # Esta URL no se usa realmente en este flujo post-mensaje, pero es requerida por el protocolo
-    REDIRECT_URI = "" 
-    # ----------------------------------------
-
-    try:
-        # 1. Obtener datos del request
-        body = await request.json()
-        gmail_token = body.get('gmail_access_token')
-        email_gmail = body.get('email_gmail')
-        server_auth_code = body.get('server_auth_code') # 🔥 NUEVO: Recibimos el código
-
-        # --- 🔥 BLOQUE DE INTERCAMBIO DE TOKENS (NUEVO) ---
-        # Si llega un código, lo canjeamos por tokens reales antes de seguir
-        nuevo_refresh_token = None
-        token_recien_horneado = False # 🔥 NUEVA BANDERA
-        # --- 🔥 BLOQUE DE INTERCAMBIO ASÍNCRONO (CERO BLOQUEOS) ---
-        if server_auth_code:
-            print(f"🔄 Canjeando código de autorización para: {email_gmail}")
-            token_url = "https://oauth2.googleapis.com/token"
-            payload = {
-                'client_id': GOOGLE_CLIENT_ID,
-                'client_secret': GOOGLE_CLIENT_SECRET,
-                'code': server_auth_code,
-                'grant_type': 'authorization_code',
-                'redirect_uri': REDIRECT_URI
-            }
-            
-            # Usamos httpx para no detener el servidor entero mientras Google responde
-            async with httpx.AsyncClient() as client:
-                res = await client.post(token_url, data=payload)
-                data_google = res.json()
-
-            if res.status_code == 200 and 'access_token' in data_google:
-                gmail_token = data_google['access_token']
-                nuevo_refresh_token = data_google.get('refresh_token') # ¡El Tesoro!
-                token_recien_horneado = True # 🔥 LE AVISAMOS AL SISTEMA QUE YA ES FRESCO
-                print(f"✅ Token canjeado exitosamente. Hay Refresh Token: {nuevo_refresh_token is not None}")
-            else:
-                cuenta_previa = await asyncio.to_thread(
-                    lambda: supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
-                )
-                if cuenta_previa.data and cuenta_previa.data[0].get('refresh_token'):
-                    print("⚠️ Código quemado, pero YA TENEMOS el refresh_token en BD. Ignorando error y continuando el flujo.")
-                else:
-                    # Solo matamos el proceso si el código es inválido Y no tenemos respaldo en la BD.
-                    print(f"⚠️ Error fatal canjeando token: {data_google}")
-                    raise HTTPException(status_code=401, detail=f"Código Auth inválido o expirado. Detalles: {data_google}")
-        # Validación original (ahora valida el token ya sea que vino directo o del canje)
-        if not gmail_token:
-            raise HTTPException(status_code=400, detail="Token de Gmail requerido o fallo en autenticación")
-        
-        # 2. 🔥 LÓGICA CORREGIDA: Upsert (Insertar o Actualizar)
-        cuenta_gmail_id = None
-        # [CIRUGÍA 3]: Generar fecha compatible con PostgreSQL para evitar fallos silenciosos de Supabase.
-        ahora_iso = datetime.now(timezone.utc).isoformat()
-
-        datos_cuenta = {
-            'usuario_id': usuario_id,
-            'email_gmail': email_gmail,
-            'access_token': gmail_token, # Guardamos el token más reciente
-            'activo': True,
-            'updated_at': ahora_iso
-        }
-
-        # 🔥 MODIFICADO: Guardamos el Refresh Token si lo conseguimos
-        if gmail_token:
-            datos_cuenta['access_token'] = gmail_token
-        if nuevo_refresh_token:
-            datos_cuenta['refresh_token'] = nuevo_refresh_token
-        elif body.get('refresh_token'): # Fallback por si viene en el body directo
-            datos_cuenta['refresh_token'] = body.get('refresh_token')
-
-        # 🚨 YA NO GUARDAMOS client_id NI client_secret EN ESTA TABLA.
-        
-        def _actualizar_bd():
-            try:
-                cuenta_exist = supabase.table('cuentas_gmail').select('id').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
-                if cuenta_exist.data:
-                    cid = cuenta_exist.data[0]['id']
-                    supabase.table('cuentas_gmail').update(datos_cuenta).eq('id', cid).execute()
-                    print(f"✅ BD: Cuenta {email_gmail} actualizada correctamente.")
-                    return cid
-                else:
-                    nueva = supabase.table('cuentas_gmail').insert(datos_cuenta).execute()
-                    print(f"✅ BD: Cuenta {email_gmail} insertada correctamente.")
-                    return nueva.data[0]['id'] if nueva.data else None
-            except Exception as e_bd:
-                print(f"❌ Error en Supabase al guardar la cuenta: {e_bd}")
-                raise e_bd
-
-        # Ejecutamos la BD sin bloquear FastAPI
-        cuenta_gmail_id = await asyncio.to_thread(_actualizar_bd)
-
-        # --- 3. MOTOR AUTÓNOMO DE RENOVACIÓN DE TOKENS ---
-        if token_recien_horneado:
-            # Si acabamos de canjear el código con éxito, usamos ese token directamente
-            print("⚡ Usando Access Token recién canjeado (Ahorrando llamada a Google).")
-            gmail_token_fresco = gmail_token
-        else:
-            # Solo si el token viene viejo de Flutter (background), aplicamos la renovación
-            def _obtener_refresh_token():
-                res = supabase.table('cuentas_gmail').select('refresh_token').eq('usuario_id', usuario_id).eq('email_gmail', email_gmail).execute()
-                if res.data and res.data[0].get('refresh_token'):
-                    return res.data[0]['refresh_token']
-                return None
-
-            refresh_token_db = await asyncio.to_thread(_obtener_refresh_token)
-
-            if not refresh_token_db:
-                print("❌ No hay Refresh Token en la BD. Imposible operar.")
-                raise HTTPException(status_code=401, detail="Debes volver a iniciar sesión con Google (Falta Refresh Token).")
-
-            try:
-                print("🔄 Generando un Access Token 100% fresco desde el Backend...")
-                credenciales = Credentials(
-                    token=None,
-                    refresh_token=refresh_token_db,
-                    token_uri="https://oauth2.googleapis.com/token",
-                    client_id=GOOGLE_CLIENT_ID,
-                    client_secret=GOOGLE_CLIENT_SECRET
-                )
-                credenciales.refresh(GoogleAuthRequest())
-                gmail_token_fresco = credenciales.token
-                print("✅ Access Token renovado con éxito por el Backend.")
-            except Exception as e:
-                print(f"❌ Error fatal renovando token con Google: {e}")
-                raise HTTPException(status_code=401, detail="El Refresh Token expiró o fue revocado. Vuelve a loguearte.")
-
-        
-        # 3. Inicializar servicio de Gmail
-        from gmail_service import GmailService
-        gmail = GmailService(access_token=gmail_token_fresco)
-        
-        # Ejecutamos el Batch Request en un hilo para no bloquear
-        correos_gmail = await asyncio.to_thread(gmail.obtener_correos_no_leidos, 15)
-        
-        if not correos_gmail:
-            return {
-                "status": "success",
-                "mensaje": "No hay correos nuevos en Gmail",
-                "estadisticas": {"procesados": 0}
-            }
-
-        # ==============================================================================
-        # 🔥 INICIO DE LA MODIFICACIÓN (FILTRO DE IDEMPOTENCIA)
-        # ==============================================================================
-        
-        print(f"📥 Gmail devolvió {len(correos_gmail)} correos candidatos. Verificando duplicados...")
-
-        # A. Extraemos solo los IDs de los correos que acabamos de bajar
-        lista_ids_nuevos = [c['id'] for c in correos_gmail]
-
-        def _buscar_duplicados():
-            return supabase.table('correos_analizados').select('id_correo_gmail').in_('id_correo_gmail', lista_ids_nuevos).execute()
-
-        try:
-            existentes_response = await asyncio.to_thread(_buscar_duplicados)
-            
-            # C. Creamos una lista de "placas" que ya conocemos
-            ids_ya_procesados = {item['id_correo_gmail'] for item in existentes_response.data}
-            
-        except Exception as e:
-            print(f"⚠️ Advertencia: No se pudo verificar duplicados en Supabase ({e}). Se procesarán todos.")
-            ids_ya_procesados = set()
-
-        # D. EL FILTRO: Solo dejamos pasar los que NO están en la lista de procesados
-        correos_a_procesar = [c for c in correos_gmail if c['id'] not in ids_ya_procesados]
-
-        print(f"🛡️ Filtro aplicado: {len(ids_ya_procesados)} descartados. {len(correos_a_procesar)} irán a la IA.")
-
-        # E. Si después del filtro no queda nada, terminamos aquí para no gastar dinero ni tiempo
-        if not correos_a_procesar:
-             return {
-                "status": "success",
-                "mensaje": "Todos los correos recientes ya habían sido analizados previamente.",
-                "estadisticas": {
-                    "procesados": 0, 
-                    "omitidos_por_duplicidad": len(ids_ya_procesados)
-                }
-            }
-            
-       # 5. Obtener datos del usuario
-        def _get_usuario():
-            return supabase.table('usuarios').select('nombre, email').eq('id', usuario_id).execute()
-            
-        user_data = await asyncio.to_thread(_get_usuario)
-        
-        nombre_usuario = ""
-        if user_data.data:
-            nombre = user_data.data[0].get('nombre', '')
-            email = user_data.data[0].get('email', '')
-            nombre_usuario = nombre if nombre else email.split('@')[0]
-        
-       
-        # 6. Procesar correos con el analizador inteligente
-        resultado = await analizador_correos.procesar_lote_correos(
-            correos=correos_a_procesar,
-            usuario_id=usuario_id,
-            gemini_client=gemini_client,
-            supabase_client=supabase,
-            nombre_usuario=nombre_usuario,
-            cuenta_gmail_id=cuenta_gmail_id  # 🔥 NUEVO: Pasar ID de cuenta
-        )
-        
-        # 7. Enviar notificaciones PUSH (solo correos críticos)
-        if resultado.get('correos_criticos'):
-            def _get_fcm():
-                return supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
-            try:
-                fcm_data = await asyncio.to_thread(_get_fcm)
-                
-                if fcm_data.data and fcm_data.data[0].get('fcm_token'):
-                    token_fcm = fcm_data.data[0]['fcm_token']
-                    correo_top = resultado['correos_criticos'][0]
-                    
-                    enviar_push(
-                        token=token_fcm,
-                        titulo=f"📧 Correo Urgente: {correo_top['correo']['asunto'][:50]}...",
-                        cuerpo=f"De: {correo_top['correo']['de']}\n{correo_top['clasificacion']['resumen_corto']}",
-                        data_extra={
-                            "tipo": "CORREO_URGENTE",
-                            "correo_id": correo_top['correo']['id'],
-                            "ir_a": "correos"
-                        }
-                    )
-            except Exception as e_notif:
-                print(f"⚠️ Error enviando notificación: {e_notif}")
-        
-        # 8. Retornar estadísticas
-        return {
-            "status": "success",
-            "mensaje": f"Analizados {resultado['procesados']} correos de {email_gmail or 'cuenta desconocida'}",
-            "email_cuenta": email_gmail,
-            "estadisticas": {
-                "procesados": resultado['procesados'],
-                "spam_descartado": resultado['spam_descartado'],
-                "baja_prioridad": resultado['accion_baja'],
-                "media_prioridad": resultado['accion_media'],
-                "alta_prioridad": resultado['accion_alta']
-            },
-            "correos_importantes": len(resultado['correos_criticos']),
-            "top_correo": resultado['correos_criticos'][0]['correo']['asunto'] if resultado['correos_criticos'] else None
-        }
+    # Llamamos a la lógica respetando tus nombres de variables
+    res = await ejecutar_logica_sincronizacion(
+        usuario_id=usuario_id,
+        gmail_token = body.get('gmail_access_token'),
+        email_gmail = body.get('email_gmail'),
+        server_auth_code = body.get('server_auth_code'),
+        gmail_refresh_token=body.get('refresh_token')
+    )
     
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        print(f"Error sincronizando correos: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if "error" in res:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
 
-@app.post("/api/analizar-historial-gmail")
-async def analizar_historial_gmail_endpoint(
-    request: Request,
-    usuario_id: str = Depends(obtener_usuario_actual)
-):
-    """
-    Analiza TODO el historial de Gmail (una sola vez por cuenta).
-    Usa filtrado inteligente para reducir costos en 94%.
-    """
-    try:
-        body = await request.json()
-        gmail_token = body.get('gmail_access_token')
-        email_gmail = body.get('email_gmail')
-        
-        if not gmail_token or not email_gmail:
-            raise HTTPException(status_code=400, detail="Token y email requeridos")
-        
-        # Inicializar servicio
-        from gmail_service import GmailService
-        gmail = GmailService(access_token=gmail_token)
-        
-        # 🔥 USAR VERSIÓN OPTIMIZADA
-        from analizador_correos import analizar_historial_gmail_optimizado
-        resultado = await analizar_historial_gmail_optimizado(
-            usuario_id=usuario_id,
-            email_gmail=email_gmail,
-            gmail_service=gmail,
-            gemini_client=gemini_client,
-            supabase_client=supabase
-        )
-        
-        return resultado
-    
-    except Exception as e:
-        print(f"Error en análisis histórico: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.post("/api/enviar-correo")
 async def enviar_correo_endpoint(
@@ -2049,49 +2043,88 @@ async def marcar_como_leido(
     correo_id: str, 
     usuario_id: str = Depends(obtener_usuario_actual)
 ):
+    # --- 🔥 ZONA DE CONFIGURACIÓN ---
+    GOOGLE_CLIENT_ID = "269344577878-gnf64lmpd3hcnlfsl1i5brduqvqq49na.apps.googleusercontent.com"
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
     try:
-        # 1. Obtener metadatos y el token de la cuenta vinculada
-        # Hacemos un join con cuentas_gmail para sacar el access_token
-        datos_correo = supabase.table('correos_analizados')\
-            .select('metadata, cuenta_gmail_id, cuentas_gmail(access_token)')\
-            .eq('id', correo_id)\
-            .single()\
-            .execute()
+        # 1. Obtener metadatos y el Refresh Token (NO el Access Token)
+        # 🔴 CORRECCIÓN IDOR: Añadimos .eq('usuario_id', usuario_id) por seguridad
+        def _obtener_datos():
+            return supabase.table('correos_analizados')\
+                .select('metadata, cuenta_gmail_id, cuentas_gmail(refresh_token)')\
+                .eq('id', correo_id)\
+                .eq('usuario_id', usuario_id)\
+                .single()\
+                .execute()
+
+        datos_correo = await asyncio.to_thread(_obtener_datos)
             
         if not datos_correo.data:
-            raise HTTPException(status_code=404, detail="Correo no encontrado")
+            raise HTTPException(status_code=404, detail="Correo no encontrado o no autorizado")
 
         gmail_msg_id = datos_correo.data['metadata'].get('correo_id_gmail')
         
-        # 🔥 CORRECCIÓN: Obtener el token de la relación
-        gmail_token = None
+        # Extraemos la "Llave Inmortal"
+        refresh_token_db = None
         if datos_correo.data.get('cuentas_gmail'):
-             gmail_token = datos_correo.data['cuentas_gmail'].get('access_token')
+            refresh_token_db = datos_correo.data['cuentas_gmail'].get('refresh_token')
 
-        # 2. Actualizar en SUPABASE (Local)
-        supabase.table('correos_analizados')\
-            .update({'leido': True, 'requiere_accion': False})\
-            .eq('id', correo_id)\
-            .execute()
+        if not refresh_token_db:
+             raise HTTPException(status_code=401, detail="No hay Refresh Token. El usuario debe re-autenticar.")
 
-        # 3. Actualizar en GMAIL (Nube)
-        if gmail_msg_id and gmail_token:
+        # 2. 🔥 MOTOR AUTÓNOMO DE RENOVACIÓN DE TOKENS (El aniquilador del 401)
+        def _renovar_token():
+            credenciales = Credentials(
+                token=None,
+                refresh_token=refresh_token_db,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=GOOGLE_CLIENT_ID,
+                client_secret=GOOGLE_CLIENT_SECRET
+            )
+            credenciales.refresh(GoogleAuthRequest())
+            return credenciales.token
+
+        try:
+            gmail_token_fresco = await asyncio.to_thread(_renovar_token)
+        except Exception as e:
+            print(f"❌ Error renovando token para marcar leído: {e}")
+            raise HTTPException(status_code=401, detail="El Refresh Token expiró o fue revocado. Vuelve a loguearte.")
+
+        # 3. Sincronizar con GMAIL (Nube) PRIMERO
+        # 🔴 CORRECCIÓN SPLIT-BRAIN: Primero aseguramos Google, luego nuestra BD
+        if gmail_msg_id:
             try:
-                # 🔥 USAMOS EL TOKEN RECUPERADO
                 from gmail_service import GmailService
-                service = GmailService(access_token=gmail_token)
+                service = GmailService(access_token=gmail_token_fresco)
                 
-                service.marcar_como_leido(gmail_msg_id)
-                print(f"✅ Sincronizado con Gmail: {gmail_msg_id}")
+                # Ejecutamos en un hilo separado para no bloquear FastAPI
+                exito_gmail = await asyncio.to_thread(service.marcar_como_leido, gmail_msg_id)
                 
+                if exito_gmail:
+                    print(f"✅ Sincronizado con Gmail (Leído): {gmail_msg_id}")
+                else:
+                     print(f"⚠️ Falló en Gmail internamente, pero el token era válido: {gmail_msg_id}")
+                     
             except Exception as e_gmail:
-                # Si falla Gmail (token vencido), no rompemos la app, solo logueamos
-                print(f"⚠️ Warning: Marcado localmente, pero falló en Gmail: {e_gmail}")
+                # Si Gmail se cae por red, logueamos pero continuamos para no romper la app
+                print(f"⚠️ Error de red con Gmail al marcar leído: {e_gmail}")
 
-        return {"mensaje": "Marcado como leído correctamente"}
+        # 4. Actualizar en SUPABASE (Local) DESPUÉS
+        def _actualizar_bd():
+            return supabase.table('correos_analizados')\
+                .update({'leido': True, 'requiere_accion': False})\
+                .eq('id', correo_id)\
+                .execute()
 
+        await asyncio.to_thread(_actualizar_bd)
+
+        return {"mensaje": "Marcado como leído correctamente y sincronizado con Google."}
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"❌ Error crítico: {e}")
+        print(f"❌ Error crítico en marcar_como_leido: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
@@ -2852,6 +2885,47 @@ async def buscar_semantica(
         print(f"❌ Error en búsqueda semántica: {e}")
         # Retornamos lista vacía en vez de error 500 para no romper la app cliente
         return {"query": query, "resultados": [], "error": str(e)}
+
+
+
+
+
+
+# --- ENDPOINT PARA RENDER (Llamar desde cron-job.org cada 10 min) ---
+@app.get("/api/health")
+async def health_check():
+    return {"status": "online", "timestamp": datetime.now().isoformat()}
+
+# --- TAREA QUE RECORRE TODAS LAS CUENTAS ---
+async def tarea_programada_global():
+    print("⏰ Iniciando sincronización automática...")
+    # Buscamos cuentas activas en la BD
+    res = await asyncio.to_thread(lambda: supabase.table('cuentas_gmail').select('usuario_id', 'email_gmail').eq('activo', True).execute())
+    
+    for cuenta in res.data:
+        print(f"📧 Procesando: {cuenta['email_gmail']}")
+        # Ejecuta la misma lógica que el botón de Flutter
+        await ejecutar_logica_sincronizacion(
+            usuario_id=cuenta['usuario_id'],
+            email_gmail=cuenta['email_gmail']
+        )
+
+# --- CONFIGURACIÓN DEL RELOJ ---
+scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def startup_event():
+    # Programar en las horas que pediste
+    trigger = CronTrigger(hour="7,9,11,14,16,18,20", minute="0", timezone="America/Lima")
+    scheduler.add_job(tarea_programada_global, trigger)
+    scheduler.start()
+    print("🚀 Reloj de sincronización activado!")
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
