@@ -2241,7 +2241,154 @@ async def revertir_respondido(
 
 # ==================== ENDPOINTS NEXUS ====================
 
-# main.py - MODIFICAR EL ENDPOINT EXISTENTE
+# =====================================================================
+# 🧠 FUNCIÓN NÚCLEO (EL CEREBRO INTERNO)
+# Esta función hace el trabajo pesado en segundo plano. No depende de HTTP.
+# =====================================================================
+async def procesar_cerebro_interno(usuario_id_real: str):
+    print(f"🚀 [BACKGROUND] Iniciando Cerebro silencioso para usuario: {usuario_id_real}")
+    
+    try:
+        # 1. Obtener mensajes pendientes
+        response = supabase.table('mensajes_whatsapp')\
+            .select('*')\
+            .eq('usuario_id', usuario_id_real)\
+            .eq('procesado_ia', False)\
+            .order('chat_nombre', desc=False)\
+            .order('timestamp', desc=False)\
+            .execute()
+        
+        mensajes = response.data
+        if not mensajes:
+            print(f"💤 [BACKGROUND] Sin mensajes nuevos para {usuario_id_real}")
+            return {"status": "sleep", "mensaje": "No hay mensajes nuevos."}
+            
+        resultados_log = []
+        mensajes.sort(key=lambda x: x['chat_nombre'])
+        
+        # 2. Procesar por chat
+        for chat_nombre, grupo in groupby(mensajes, key=lambda x: x['chat_nombre']):
+            lista_mensajes = list(grupo)
+            texto_total = " ".join([m['contenido'] for m in lista_mensajes])
+            
+            # Filtro de ruido
+            if len(lista_mensajes) < 2 and len(texto_total) < 10:
+                ids_ruido = [m['id'] for m in lista_mensajes]
+                for mid in ids_ruido:
+                    supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).eq('id', mid).execute()
+                continue
+
+            print(f"🤖 [BACKGROUND] Analizando chat: {chat_nombre} ({len(lista_mensajes)} msgs)")
+            
+            try:
+                # Memoria Previa
+                memoria_db = supabase.table('memoria_chats')\
+                    .select('*')\
+                    .eq('chat_nombre', chat_nombre)\
+                    .eq('usuario_id', usuario_id_real)\
+                    .execute()
+                    
+                contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.') if memoria_db.data else "Sin historial previo."
+
+                # Indexación ChromaDB
+                transcripcion = ""
+                ids_a_procesar = []
+                ultimo_timestamp = ""
+                
+                try:
+                    emb_model = get_embedding_model()
+                except:
+                    emb_model = None
+
+                for m in lista_mensajes:
+                    autor = "YO" if m['es_mio'] else chat_nombre
+                    transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
+                    ids_a_procesar.append(m['id'])
+                    ultimo_timestamp = m['timestamp']
+
+                    if emb_model and m['contenido'] and len(m['contenido']) > 5:
+                        try:
+                            vector = emb_model.encode([m['contenido']])[0].tolist()
+                            collection_mensajes.add(
+                                ids=[str(m['id'])],
+                                embeddings=[vector],
+                                documents=[m['contenido']],
+                                metadatas=[{
+                                    "chat_nombre": chat_nombre,
+                                    "usuario_id": usuario_id_real,
+                                    "fecha": m['timestamp'],
+                                    "es_mio": m['es_mio']
+                                }]
+                            )
+                        except Exception as e_chroma:
+                            print(f"   ⚠️ Error indexando: {e_chroma}")
+
+                # Prompt Gemini
+                prompt = f"""
+                Actúa como un Analista de Datos Personales experto.
+                
+                CONTEXTO ANTERIOR (Resumen de lo hablado antes):
+                "{contexto_previo}"
+                
+                NUEVA CONVERSACIÓN (Mensajes recientes):
+                {transcripcion}
+                
+                TU OBJETIVO:
+                Generar un JSON válido con 3 campos obligatorios:
+                
+                1. "nuevo_resumen": Un párrafo que combine el contexto anterior con lo nuevo. Si el tema cambió drásticamente, descarta lo viejo irrelevante. Mantén fechas y acuerdos.
+                2. "tareas": Una lista de objetos. Si no hay tareas, lista vacía []. Cada objeto debe tener:
+                - "titulo": Breve (ej: "Comprar leche")
+                - "descripcion": Detalles (ej: "Marca X, para mañana")
+                - "prioridad": "ALTA", "MEDIA" o "BAJA"
+                3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
+
+                IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
+                """
+
+
+                # Llamada IA
+                respuesta_ai = model.generate_content(prompt).text
+                datos_ia = limpiar_json_gemini(respuesta_ai)
+                
+                # Guardar Memoria
+                datos_memoria = {
+                    'chat_nombre': chat_nombre,
+                    'usuario_id': usuario_id_real,
+                    'resumen_actual': datos_ia.get('nuevo_resumen', 'No se generó resumen.'),
+                    'ultima_actualizacion': datetime.utcnow().isoformat(),
+                    'temas_abiertos': datos_ia.get('intencion', 'OTROS')
+                }
+                supabase.table('memoria_chats').upsert(datos_memoria).execute()
+
+                # Guardar Tareas
+                tareas_detectadas = datos_ia.get('tareas', [])
+                for tarea in tareas_detectadas:
+                    supabase.table('alertas').insert({
+                        'usuario_id': usuario_id_real,
+                        'titulo': f"⚡ {tarea.get('titulo', 'Nueva tarea')}",
+                        'descripcion': f"Origen: {chat_nombre}. {tarea.get('descripcion', '')}",
+                        'tipo': 'tarea_ia',
+                        'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
+                        'metadata': {'origen': 'whatsapp_cerebro', 'chat': chat_nombre}
+                    }).execute()
+
+                # Marcar como procesados
+                if ids_a_procesar:
+                    supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
+
+                resultados_log.append({"chat": chat_nombre, "tareas_creadas": len(tareas_detectadas)})
+
+            except Exception as e_chat:
+                print(f"❌ Error en chat {chat_nombre}: {e_chat}")
+                continue
+                
+        print(f"✅ [BACKGROUND] Cerebro finalizó para {usuario_id_real}")
+        return {"status": "success", "resumen": resultados_log}
+        
+    except Exception as e:
+        print(f"❌ [BACKGROUND] Error fatal en cerebro: {e}")
+        return {"status": "error", "detalle": str(e)}
 
 # main.py - VERSIÓN CORREGIDA PARA LEER EL TOKEN DE ANDROID
 
@@ -2311,6 +2458,9 @@ async def sincronizar_batch_nexus(
             supabase.table('mensajes_whatsapp').upsert(datos_para_insertar).execute()
             print(f"✅ Ingesta Rápida: {len(datos_para_insertar)} mensajes guardados (Pendientes de análisis).")
 
+            # 🔥 AQUÍ OCURRE LA MAGIA 🔥
+            # Le decimos a FastAPI: "Cuando devuelvas el return 200, ejecuta esto"
+            background_tasks.add_task(procesar_cerebro_interno, USER_ID_REAL)
         return {
             "status": "success",
             "mode": "ingesta_rapida", # Confirmación de que no gastaste tokens
@@ -2322,22 +2472,14 @@ async def sincronizar_batch_nexus(
         raise HTTPException(500, f"Error interno: {str(e)}")
 
 
-
+# =====================================================================
+# 2️⃣ ENDPOINT: ACTIVACIÓN MANUAL (Para pruebas o forzado desde Flutter)
+# =====================================================================
 @app.post("/nexus/cerebro/activar")
-async def activar_cerebro_inteligente(
-    authorization: str = Header(None)
-):
-    """
-    CEREBRO INTELIGENTE (Producción):
-    1. Agrupa mensajes pendientes por chat.
-    2. Lee la memoria anterior de ese chat.
-    3. Analiza con IA buscando: Resumen actualizado, Tareas y Datos Clave.
-    4. Guarda todo en la BD y marca mensajes como procesados.
-    """
-    
-    # --- 1. VALIDACIÓN DE SEGURIDAD ---
+async def activar_cerebro_inteligente(authorization: str = Header(None)):
+    """Mantenemos este endpoint intacto por si quieres forzar la IA manualmente"""
     if not authorization:
-        raise HTTPException(status_code=401, detail="Falta el Token")
+        raise HTTPException(status_code=401, detail="Falta Token")
     try:
         token = authorization.split(" ")[1]
         user_response = supabase.auth.get_user(token)
@@ -2345,192 +2487,11 @@ async def activar_cerebro_inteligente(
             raise HTTPException(status_code=401, detail="Token inválido")
         USER_ID_REAL = user_response.user.id
     except Exception as e:
-        print(f"❌ Error Auth Cerebro: {e}")
-        raise HTTPException(status_code=401, detail="Error de autenticación")
+        raise HTTPException(status_code=401, detail="Error auth")
 
-    print(f"🧠 Cerebro activado para usuario: {USER_ID_REAL}")
-
-    # --- 2. OBTENER MENSAJES PENDIENTES ---
-    try:
-        # Solo mensajes de ESTE usuario que NO han sido procesados
-        response = supabase.table('mensajes_whatsapp')\
-            .select('*')\
-            .eq('usuario_id', USER_ID_REAL)\
-            .eq('procesado_ia', False)\
-            .order('chat_nombre', desc=False)\
-            .order('timestamp', desc=False)\
-            .execute()
-        
-        mensajes = response.data
-        
-        if not mensajes:
-            return {"status": "sleep", "mensaje": "No hay mensajes nuevos para analizar."}
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error leyendo mensajes: {e}")
-
-    # --- 3. PROCESAMIENTO POR LOTES (Conversaciones) ---
-    resultados_log = []
-    
-    # Agrupamos por nombre del chat (la lista debe estar ordenada por nombre primero)
-    # Nota: itertools.groupby requiere que la lista esté ordenada por la clave de agrupación
-    mensajes.sort(key=lambda x: x['chat_nombre'])
-    
-    for chat_nombre, grupo in groupby(mensajes, key=lambda x: x['chat_nombre']):
-        lista_mensajes = list(grupo)
-        
-        # Filtro de ruido: Si es muy poco texto, lo marcamos procesado y saltamos
-        # para no gastar IA en un "ok"
-        texto_total = " ".join([m['contenido'] for m in lista_mensajes])
-        if len(lista_mensajes) < 2 and len(texto_total) < 10:
-            ids_ruido = [m['id'] for m in lista_mensajes]
-            for mid in ids_ruido:
-                supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).eq('id', mid).execute()
-            print(f"⏩ Saltando hilo corto/ruido con {chat_nombre}")
-            continue
-
-        print(f"🤖 Analizando conversación con: {chat_nombre} ({len(lista_mensajes)} msgs)")
-
-        try:
-            # A. RECUPERAR MEMORIA PREVIA
-            memoria_db = supabase.table('memoria_chats')\
-                .select('*')\
-                .eq('chat_nombre', chat_nombre)\
-                .eq('usuario_id', USER_ID_REAL)\
-                .execute()
-                
-            contexto_previo = "Sin historial previo."
-            if memoria_db.data:
-                contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.')
-
-            # B. PREPARAR TRANSCRIPCIÓN E INDEXAR EN CHROMA (PASO 5)
-            transcripcion = ""
-            ids_a_procesar = []
-            ultimo_timestamp = ""
-            
-            # --- CARGAMOS EL MODELO DE EMBEDDINGS UNA VEZ ---
-            try:
-                emb_model = get_embedding_model() # Asegúrate de tener esto importado
-            except:
-                emb_model = None
-                print("⚠️ No se pudo cargar el modelo de embeddings")
-
-            for m in lista_mensajes:
-                # 1. Lógica existente (Transcrpción)
-                autor = "YO" if m['es_mio'] else chat_nombre
-                transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
-                ids_a_procesar.append(m['id'])
-                ultimo_timestamp = m['timestamp']
-
-                # 👇👇👇 INICIO DEL BLOQUE NUEVO (PASO 5) 👇👇👇
-                # Guardamos cada mensaje individual en el Buscador Semántico
-                try:
-                    # Solo indexamos si el contenido es relevante (> 5 caracteres)
-                    # y si tenemos el modelo cargado
-                    if emb_model and m['contenido'] and len(m['contenido']) > 5:
-                        
-                        # Vectorizamos (Convertimos texto a números)
-                        vector = emb_model.encode([m['contenido']])[0].tolist()
-                        
-                        # Guardamos en ChromaDB
-                        collection_mensajes.add(
-                            ids=[str(m['id'])], # Convertimos a string por seguridad
-                            embeddings=[vector],
-                            documents=[m['contenido']],
-                            metadatas=[{
-                                "chat_nombre": chat_nombre,
-                                "usuario_id": USER_ID_REAL,
-                                "fecha": m['timestamp'],
-                                "es_mio": m['es_mio']
-                            }]
-                        )
-                        # print(f"   📇 Indexado: {m['contenido'][:20]}...") 
-                        # (Comentado para no ensuciar mucho el log)
-                except Exception as e_chroma:
-                    print(f"   ⚠️ Error indexando mensaje {m['id']}: {e_chroma}")
-                # 👆👆👆 FIN DEL BLOQUE NUEVO 👆👆👆
-
-            # C. PROMPT PARA GEMINI (Estructura Estricta)
-            prompt = f"""
-            Actúa como un Analista de Datos Personales experto.
-            
-            CONTEXTO ANTERIOR (Resumen de lo hablado antes):
-            "{contexto_previo}"
-            
-            NUEVA CONVERSACIÓN (Mensajes recientes):
-            {transcripcion}
-            
-            TU OBJETIVO:
-            Generar un JSON válido con 3 campos obligatorios:
-            
-            1. "nuevo_resumen": Un párrafo que combine el contexto anterior con lo nuevo. Si el tema cambió drásticamente, descarta lo viejo irrelevante. Mantén fechas y acuerdos.
-            2. "tareas": Una lista de objetos. Si no hay tareas, lista vacía []. Cada objeto debe tener:
-               - "titulo": Breve (ej: "Comprar leche")
-               - "descripcion": Detalles (ej: "Marca X, para mañana")
-               - "prioridad": "ALTA", "MEDIA" o "BAJA"
-            3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
-
-            IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
-            """
-
-            # D. LLAMADA A LA IA
-            # Asegúrate de que 'model' está inicializado globalmente en tu script
-            respuesta_ai = model.generate_content(prompt).text
-            
-            # E. LIMPIEZA Y PARSEO
-            datos_ia = limpiar_json_gemini(respuesta_ai)
-            
-            # F. GUARDAR MEMORIA ACTUALIZADA (Upsert)
-            datos_memoria = {
-                'chat_nombre': chat_nombre,
-                'usuario_id': USER_ID_REAL, # Importante para multi-usuario
-                'resumen_actual': datos_ia.get('nuevo_resumen', 'No se generó resumen.'),
-                'ultima_actualizacion': datetime.utcnow().isoformat(),
-                'temas_abiertos': datos_ia.get('intencion', 'OTROS')
-            }
-            supabase.table('memoria_chats').upsert(datos_memoria).execute()
-
-            # G. GUARDAR TAREAS / ALERTAS (Iteramos la lista que devolvió la IA)
-            tareas_detectadas = datos_ia.get('tareas', [])
-            for tarea in tareas_detectadas:
-                supabase.table('alertas').insert({
-                    'usuario_id': USER_ID_REAL,
-                    'titulo': f"⚡ {tarea.get('titulo', 'Nueva tarea')}",
-                    'descripcion': f"Origen: {chat_nombre}. {tarea.get('descripcion', '')}",
-                    'tipo': 'tarea_ia',
-                    'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
-                    'metadata': {
-                        'origen': 'whatsapp_cerebro',
-                        'chat': chat_nombre,
-                        'timestamp_origen': ultimo_timestamp
-                    }
-                }).execute()
-                print(f"   ✅ Tarea creada: {tarea.get('titulo')}")
-
-            # H. MARCAR MENSAJES COMO PROCESADOS
-            # Lo hacemos uno por uno o en batch si Supabase lo permite con 'in'. 
-            # Por seguridad haremos un update general por lista de IDs.
-            if ids_a_procesar:
-                supabase.table('mensajes_whatsapp')\
-                    .update({'procesado_ia': True})\
-                    .in_('id', ids_a_procesar)\
-                    .execute()
-
-            resultados_log.append({
-                "chat": chat_nombre,
-                "mensajes": len(lista_mensajes),
-                "tareas_creadas": len(tareas_detectadas)
-            })
-
-        except Exception as e_chat:
-            print(f"❌ Error procesando chat {chat_nombre}: {e_chat}")
-            continue # Si falla un chat, seguimos con el siguiente
-
-    return {
-        "status": "success",
-        "resumen_operacion": resultados_log
-    }
-
+    # Llamamos a la misma función interna y esperamos a que termine
+    resultado = await procesar_cerebro_interno(USER_ID_REAL)
+    return resultado
 
 
 
