@@ -437,6 +437,14 @@ async def lifespan(app: FastAPI):
     # 6:00 PM - Evening Planning
     scheduler.add_job(generar_briefing, CronTrigger(hour=18, minute=0, timezone='America/Lima'), args=["nocturno"])
     
+    # 2. NUEVA: Tarea de Sincronización de Correos
+    scheduler.add_job(
+        tarea_programada_global, 
+        CronTrigger(hour="7,9,11,14,16,18,20", minute="0", timezone="America/Lima")
+    )
+
+
+
     scheduler.start()
     # --- FIN SCHEDULER ---
     
@@ -2857,30 +2865,34 @@ async def buscar_semantica(
 async def health_check():
     return {"status": "online", "timestamp": datetime.now().isoformat()}
 
-# --- TAREA QUE RECORRE TODAS LAS CUENTAS ---
 async def tarea_programada_global():
-    print("⏰ Iniciando sincronización automática...")
-    # Buscamos cuentas activas en la BD
-    res = await asyncio.to_thread(lambda: supabase.table('cuentas_gmail').select('usuario_id', 'email_gmail').eq('activo', True).execute())
-    
-    for cuenta in res.data:
-        print(f"📧 Procesando: {cuenta['email_gmail']}")
-        # Ejecuta la misma lógica que el botón de Flutter
-        await ejecutar_logica_sincronizacion(
-            usuario_id=cuenta['usuario_id'],
-            email_gmail=cuenta['email_gmail']
-        )
+    print("⏰ [CRON-MAIL] Iniciando sincronización automática...")
+    try:
+        # Buscamos cuentas activas en la BD (tu lógica original)
+        res = await asyncio.to_thread(lambda: supabase.table('cuentas_gmail').select('usuario_id', 'email_gmail').eq('activo', True).execute())
+        
+        if not res.data:
+            print("ℹ️ [CRON-MAIL] No hay cuentas activas para sincronizar.")
+            return
 
-# --- CONFIGURACIÓN DEL RELOJ ---
-scheduler = AsyncIOScheduler()
+        for cuenta in res.data:
+            print(f"📧 [CRON-MAIL] Procesando: {cuenta['email_gmail']}")
+            
+            # BLINDAJE: try/except por cada cuenta
+            try:
+                # Ejecuta la misma lógica que el botón de Flutter
+                await ejecutar_logica_sincronizacion(
+                    usuario_id=cuenta['usuario_id'],
+                    email_gmail=cuenta['email_gmail']
+                )
+                # Pausa de seguridad obligatoria para no saturar Gemini (Free Tier)
+                await asyncio.sleep(10) 
+            except Exception as error_cuenta:
+                print(f"❌ [CRON-MAIL] Error aislando la cuenta {cuenta['email_gmail']}: {error_cuenta}")
+                continue # Pasa a la siguiente cuenta sin romper el bucle general
 
-@app.on_event("startup")
-async def startup_event():
-    # Programar en las horas que pediste
-    trigger = CronTrigger(hour="7,9,11,14,16,18,20", minute="0", timezone="America/Lima")
-    scheduler.add_job(tarea_programada_global, trigger)
-    scheduler.start()
-    print("🚀 Reloj de sincronización activado!")
+    except Exception as error_global:
+        print(f"❌ [CRON-MAIL] Error crítico en la consulta de BD: {error_global}")
 
 
 
