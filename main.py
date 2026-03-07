@@ -2303,31 +2303,32 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 ids_a_procesar = []
                 ultimo_timestamp = ""
                 
-                try:
-                    emb_model = get_embedding_model()
-                except:
-                    emb_model = None
-
+                
                 for m in lista_mensajes:
                     autor = "YO" if m['es_mio'] else chat_nombre
                     transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
                     ids_a_procesar.append(m['id'])
                     ultimo_timestamp = m['timestamp']
 
-                    if emb_model and m['contenido'] and len(m['contenido']) > 5:
+                    # 🔥 EL NUEVO CÓDIGO USANDO GOOGLE 🔥
+                    if m['contenido'] and len(m['contenido']) > 5:
                         try:
-                            vector = emb_model.encode([m['contenido']])[0].tolist()
-                            collection_mensajes.add(
-                                ids=[str(m['id'])],
-                                embeddings=[vector],
-                                documents=[m['contenido']],
-                                metadatas=[{
-                                    "chat_nombre": chat_nombre,
-                                    "usuario_id": usuario_id_real,
-                                    "fecha": m['timestamp'],
-                                    "es_mio": m['es_mio']
-                                }]
-                            )
+                            # 1. Pedimos el vector a Google (SIN gastar RAM)
+                            vector = await generar_embedding(m['contenido'])
+
+                            # 2. Si Google nos devolvió los números, los guardamos en Chroma
+                            if vector:
+                                collection_mensajes.add(
+                                    ids=[str(m['id'])],
+                                    embeddings=[vector],
+                                    documents=[m['contenido']],
+                                    metadatas=[{
+                                        "chat_nombre": chat_nombre,
+                                        "usuario_id": usuario_id_real,
+                                        "fecha": m['timestamp'],
+                                        "es_mio": m['es_mio']
+                                    }]
+                                )
                         except Exception as e_chroma:
                             print(f"   ⚠️ Error indexando: {e_chroma}")
 
