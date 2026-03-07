@@ -2329,6 +2329,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                                         "es_mio": m['es_mio']
                                     }]
                                 )
+                            await asyncio.sleep(0.8)
                         except Exception as e_chroma:
                             print(f"   ⚠️ Error indexando: {e_chroma}")
 
@@ -2356,10 +2357,36 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 """
 
 
-                # Llamada IA
-                respuesta_ai = model.generate_content(prompt).text
-                datos_ia = limpiar_json_gemini(respuesta_ai)
-                
+                # 🔥 LLAMADA A LA IA CORREGIDA (Usando tu estándar exacto) 🔥
+                global gemini_client
+                if not gemini_client:
+                    gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
+
+                # Inicializamos datos_ia con un fallback seguro por si falla Gemini
+                datos_ia = {
+                    "nuevo_resumen": contexto_previo, 
+                    "tareas": [], 
+                    "intencion": "OTROS"
+                }
+
+                try:
+                    response = gemini_client.models.generate_content(
+                        model=MODELO_IA, # Usamos tu variable global
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json", # Fuerzas a que devuelva un JSON perfecto
+                            temperature=0.1 # Baja temperatura para que sea analítico, no creativo
+                        )
+                    )
+                    
+                    # Como forzamos el mime_type, la respuesta ya es un JSON parseable directamente
+                    
+                    datos_ia = json.loads(response.text)
+                except Exception as e_ia:
+                    print(f"❌ Error al generar resumen con Gemini: {e_ia}")
+
+
+                    
                 # Guardar Memoria
                 datos_memoria = {
                     'chat_nombre': chat_nombre,
