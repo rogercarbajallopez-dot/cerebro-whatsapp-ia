@@ -481,18 +481,6 @@ collection_mensajes = chroma_client.get_or_create_collection(
     metadata={"description": "Mensajes indexados para Nexus"}
 )
 
-# Variable global para el modelo
-embedding_model = None
-
-def get_embedding_model():
-    global embedding_model
-    if embedding_model is None:
-        print("📥 Cargando modelo de embeddings (LITE)...")
-        # Usamos 'all-MiniLM-L6-v2' que es 5 veces más ligero que el 'paraphrase'
-        # Esto es CRÍTICO para que no explote la RAM de Render
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        print("✅ Modelo de embeddings cargado")
-    return embedding_model
 
 # ======================================================================
 # 🧠 LÓGICA DE IA (SIN CAMBIOS)
@@ -1301,6 +1289,45 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 # ==============================================================================
 # 🧠 CEREBRO IA: MEMORIA Y VECTORES
 # ==============================================================================
+
+async def generar_embeddings_batch(textos: list):
+    """NUEVA FUNCIÓN: Usa exactamente tu misma lógica, pero para listas de textos."""
+    if not GEMINI_DISPONIBLE: return []
+    try:
+        global gemini_client 
+        if gemini_client is None and API_KEY_GOOGLE:
+             gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
+
+        if not gemini_client or not textos:
+            return []
+
+        # Limpiamos la lista y evitamos textos vacíos
+        textos_limpios = [t.replace("\n", " ").strip() for t in textos if t.strip()]
+        if not textos_limpios: return []
+
+        modelos = ["gemini-embedding-001", "models/gemini-embedding-001"]
+        
+        for modelo_actual in modelos:
+            try:
+                # Enviamos la LISTA completa (Batching)
+                result = gemini_client.models.embed_content(
+                    model=modelo_actual,
+                    contents=textos_limpios
+                )
+                
+                if result.embeddings:
+                    # Retorna una lista con los múltiples vectores individuales
+                    return [e.values for e in result.embeddings]
+            
+            except Exception as e_modelo:
+                continue # Falla silenciosa para probar el siguiente modelo
+
+        return []
+
+    except Exception as e:
+        print(f"⚠️ Error generando batch embedding: {e}")
+        return []
+
 
 async def generar_embedding(texto: str):
     """Convierte texto en una lista de números (vector) usando Gemini"""
@@ -2253,6 +2280,8 @@ async def revertir_respondido(
 # 🧠 FUNCIÓN NÚCLEO (EL CEREBRO INTERNO)
 # Esta función hace el trabajo pesado en segundo plano. No depende de HTTP.
 # =====================================================================
+
+
 async def procesar_cerebro_interno(usuario_id_real: str):
     print(f"🚀 [BACKGROUND] Iniciando Cerebro silencioso para usuario: {usuario_id_real}")
     
@@ -2272,97 +2301,129 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             return {"status": "sleep", "mensaje": "No hay mensajes nuevos."}
             
         resultados_log = []
-        mensajes.sort(key=lambda x: x['chat_nombre'])
+
+        # ---------------------------------------------------------
+        # 🧠 CAPA DE RESOLUCIÓN DE IDENTIDAD (DIRECTORIO + GRUPOS)
+        # ---------------------------------------------------------
+        # ✅ CORRECCIÓN: Usamos chat_id en lugar de chat_nombre
+        ids_en_lote = list(set([m['chat_id'] for m in mensajes]))
         
-        # 2. Procesar por chat
-        for chat_nombre, grupo in groupby(mensajes, key=lambda x: x['chat_nombre']):
+        directorio_db = supabase.table('contactos_directorio')\
+            .select('chat_id, numero_telefonico')\
+            .eq('usuario_id', usuario_id_real)\
+            .in_('chat_id', ids_en_lote)\
+            .execute()
+            
+        # Diccionario: {'Pancha': '+51999999999'}
+        mapa_identidades = {d['chat_id']: d['numero_telefonico'] for d in directorio_db.data}
+        
+        # Asignar número telefónico (CON LA CORRECCIÓN DE GRUPOS)
+        for m in mensajes:
+            numero_encontrado = mapa_identidades.get(m['chat_nombre'])
+            if numero_encontrado:
+                m['numero_telefonico'] = numero_encontrado
+            else:
+                # CORRECCIÓN VITAL PARA GRUPOS: Si es un grupo, usamos su ID inmutable.
+                if '@g.us' in m['chat_id'] or '-' in m['chat_id']:
+                    m['numero_telefonico'] = m['chat_id'] # El ID del grupo nunca cambia
+                else:
+                    m['numero_telefonico'] = m['chat_nombre'] # Fallback final a nombre
+
+        # ---------------------------------------------------------
+        # 2. PROCESAR AGRUPANDO POR NÚMERO TELEFÓNICO O ID
+        # ---------------------------------------------------------
+        mensajes.sort(key=lambda x: x['numero_telefonico'])
+        
+        for numero_tel, grupo in groupby(mensajes, key=lambda x: x['numero_telefonico']):
             lista_mensajes = list(grupo)
+            
+            # Guardamos el nombre más reciente usado en este lote
+            nombre_display_actual = lista_mensajes[-1]['chat_nombre'] 
             texto_total = " ".join([m['contenido'] for m in lista_mensajes])
+            ids_a_procesar = [m['id'] for m in lista_mensajes]
             
             # Filtro de ruido
             if len(lista_mensajes) < 2 and len(texto_total) < 10:
-                ids_ruido = [m['id'] for m in lista_mensajes]
-                for mid in ids_ruido:
-                    supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).eq('id', mid).execute()
+                supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
                 continue
 
-            print(f"🤖 [BACKGROUND] Analizando chat: {chat_nombre} ({len(lista_mensajes)} msgs)")
+            print(f"🤖 [BACKGROUND] Analizando chat: {nombre_display_actual} (Ancla: {numero_tel}) ({len(lista_mensajes)} msgs)")
             
             try:
-                # Memoria Previa
+                # 🔥 BUSCAR MEMORIA POR EL ANCLA INMUTABLE (Teléfono o ID de Grupo)
                 memoria_db = supabase.table('memoria_chats')\
                     .select('*')\
-                    .eq('chat_nombre', chat_nombre)\
+                    .eq('numero_telefonico', numero_tel)\
                     .eq('usuario_id', usuario_id_real)\
                     .execute()
                     
                 contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.') if memoria_db.data else "Sin historial previo."
 
                 # Indexación ChromaDB
+                # 1. Preparar transcripción para el resumen
                 transcripcion = ""
-                ids_a_procesar = []
-                ultimo_timestamp = ""
-                
+                mensajes_a_vectorizar = [] # Guardaremos aquí los que valen la pena vectorizar
                 
                 for m in lista_mensajes:
-                    autor = "YO" if m['es_mio'] else chat_nombre
+                    autor = "YO" if m['es_mio'] else nombre_display_actual
                     transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
-                    ids_a_procesar.append(m['id'])
-                    ultimo_timestamp = m['timestamp']
-
-                    # 🔥 EL NUEVO CÓDIGO USANDO GOOGLE 🔥
+                    
                     if m['contenido'] and len(m['contenido']) > 5:
-                        try:
-                            # 1. Pedimos el vector a Google (SIN gastar RAM)
-                            vector = await generar_embedding(m['contenido'])
+                        mensajes_a_vectorizar.append(m)
 
-                            # 2. Si Google nos devolvió los números, los guardamos en Chroma
-                            if vector:
-                                collection_mensajes.add(
-                                    ids=[str(m['id'])],
-                                    embeddings=[vector],
-                                    documents=[m['contenido']],
-                                    metadatas=[{
-                                        "chat_nombre": chat_nombre,
-                                        "usuario_id": usuario_id_real,
-                                        "fecha": m['timestamp'],
-                                        "es_mio": m['es_mio']
-                                    }]
-                                )
-                            await asyncio.sleep(0.8)
-                        except Exception as e_chroma:
-                            print(f"   ⚠️ Error indexando: {e_chroma}")
+                # 2. Indexación ChromaDB con BATCHING (Rápido y ahorra cuota)
+                if mensajes_a_vectorizar:
+                    textos_batch = [m['contenido'] for m in mensajes_a_vectorizar]
+                    ids_batch = [str(m['id']) for m in mensajes_a_vectorizar]
+                    metadatas_batch = [{
+                        "chat_nombre": nombre_display_actual,
+                        "numero_telefonico": numero_tel,
+                        "usuario_id": usuario_id_real,
+                        "fecha": m['timestamp'],
+                        "es_mio": m['es_mio']
+                    } for m in mensajes_a_vectorizar]
+
+                    try:
+                        # Una sola llamada a la API para todos los mensajes de este chat
+                        vectores_batch = await generar_embeddings_batch(textos_batch)
+                        
+                        if vectores_batch and len(vectores_batch) == len(textos_batch):
+                            collection_mensajes.add(
+                                ids=ids_batch,
+                                embeddings=vectores_batch,
+                                documents=textos_batch,
+                                metadatas=metadatas_batch
+                            )
+                            # Imprimimos confirmación
+                            print(f"  ✅ ChromaDB: {len(vectores_batch)} vectores guardados (1 petición API).")
+                        else:
+                            print(f"  ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
+                    except Exception as e_chroma:
+                        print(f"  ⚠️ Error indexando en ChromaDB: {e_chroma}")
 
                 # Prompt Gemini
                 prompt = f"""
+
                 Actúa como un Analista de Datos Personales experto.
-                
                 CONTEXTO ANTERIOR (Resumen de lo hablado antes):
                 "{contexto_previo}"
-                
                 NUEVA CONVERSACIÓN (Mensajes recientes):
                 {transcripcion}
-                
                 TU OBJETIVO:
                 Generar un JSON válido con 3 campos obligatorios:
-                
                 1. "nuevo_resumen": Un párrafo que combine el contexto anterior con lo nuevo. Si el tema cambió drásticamente, descarta lo viejo irrelevante. Mantén fechas y acuerdos.
                 2. "tareas": Una lista de objetos. Si no hay tareas, lista vacía []. Cada objeto debe tener:
                 - "titulo": Breve (ej: "Comprar leche")
                 - "descripcion": Detalles (ej: "Marca X, para mañana")
                 - "prioridad": "ALTA", "MEDIA" o "BAJA"
                 3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
-
                 IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
                 """
 
-
-                # 🔥 LLAMADA A LA IA CORREGIDA (Usando tu estándar exacto) 🔥
                 global gemini_client
                 if not gemini_client:
                     gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
 
-                # Inicializamos datos_ia con un fallback seguro por si falla Gemini
                 datos_ia = {
                     "nuevo_resumen": contexto_previo, 
                     "tareas": [], 
@@ -2371,55 +2432,56 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                 try:
                     response = gemini_client.models.generate_content(
-                        model=MODELO_IA, # Usamos tu variable global
+                        model=MODELO_IA,
                         contents=prompt,
                         config=types.GenerateContentConfig(
-                            response_mime_type="application/json", # Fuerzas a que devuelva un JSON perfecto
-                            temperature=0.1 # Baja temperatura para que sea analítico, no creativo
+                            response_mime_type="application/json",
+                            temperature=0.1
                         )
                     )
-                    
-                    # Como forzamos el mime_type, la respuesta ya es un JSON parseable directamente
-                    
                     datos_ia = json.loads(response.text)
                 except Exception as e_ia:
-                    print(f"❌ Error al generar resumen con Gemini: {e_ia}")
-
-
-                    
-                # Guardar Memoria
+                    print(f"❌ Error procesando con Gemini: {e_ia}")
+                
+                # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
-                    'chat_nombre': chat_nombre,
+                    'chat_nombre': nombre_display_actual, # Actualiza si cambió de nombre ("Pancha", "Ventas 2027")
+                    'numero_telefonico': numero_tel,      # El ancla inmutable
                     'usuario_id': usuario_id_real,
-                    'resumen_actual': datos_ia.get('nuevo_resumen', 'No se generó resumen.'),
+                    'resumen_actual': datos_ia.get('nuevo_resumen', contexto_previo),
                     'ultima_actualizacion': datetime.utcnow().isoformat(),
                     'temas_abiertos': datos_ia.get('intencion', 'OTROS')
                 }
-                supabase.table('memoria_chats').upsert(datos_memoria).execute()
+                
+                # Upsert mágico de Supabase
+                supabase.table('memoria_chats').upsert(
+                    datos_memoria, 
+                    on_conflict='numero_telefonico, usuario_id'
+                ).execute()
 
-                # Guardar Tareas
+                # Guardar Tareas Detectadas
                 tareas_detectadas = datos_ia.get('tareas', [])
                 for tarea in tareas_detectadas:
                     supabase.table('alertas').insert({
                         'usuario_id': usuario_id_real,
                         'titulo': f"⚡ {tarea.get('titulo', 'Nueva tarea')}",
-                        'descripcion': f"Origen: {chat_nombre}. {tarea.get('descripcion', '')}",
+                        'descripcion': f"Origen: {nombre_display_actual}. {tarea.get('descripcion', '')}",
                         'tipo': 'tarea_ia',
                         'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
-                        'metadata': {'origen': 'whatsapp_cerebro', 'chat': chat_nombre}
+                        'metadata': {'origen': 'whatsapp_cerebro', 'chat': nombre_display_actual, 'telefono': numero_tel}
                     }).execute()
 
-                # Marcar como procesados
+                # Marcar mensajes como procesados
                 if ids_a_procesar:
                     supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
 
-                resultados_log.append({"chat": chat_nombre, "tareas_creadas": len(tareas_detectadas)})
+                resultados_log.append({"chat": nombre_display_actual, "tareas_creadas": len(tareas_detectadas)})
 
             except Exception as e_chat:
-                print(f"❌ Error en chat {chat_nombre}: {e_chat}")
+                print(f"❌ Error general en chat {nombre_display_actual}: {e_chat}")
                 continue
                 
-        print(f"✅ [BACKGROUND] Cerebro finalizó para {usuario_id_real}")
+        print(f"✅ [BACKGROUND] Cerebro finalizó con éxito para {usuario_id_real}")
         return {"status": "success", "resumen": resultados_log}
         
     except Exception as e:
@@ -2800,16 +2862,11 @@ async def procesar_ocr_imagen(
                     'texto_ocr': texto_extraido,
                     'tiene_texto': True,
                     'procesado_ocr_en': datetime.utcnow().isoformat()
-                }
+                },
+                'procesado_ia': False
             }).eq('id', mensaje_id).execute()
             
-            # Procesar con IA
-            await procesar_mensaje_whatsapp_ia(
-                mensaje_id=mensaje_id,
-                contenido=texto_extraido,  # ← Usar texto de imagen
-                chat_nombre=chat_nombre,
-                usuario_id='00000000-0000-0000-0000-000000000000'
-            )
+            
         else:
             print(f"ℹ️ Imagen sin texto significativo")
         
@@ -2835,25 +2892,18 @@ async def procesar_ocr_imagen(
             pass
 
 @app.post("/nexus/buscar_semantica")
-async def buscar_semantica(
-    query: str,
-    usuario_id: str, # Recibimos usuario para futuros filtros, aunque Chroma es global por ahora
-    limite: int = 5
-):
+async def buscar_semantica(query: str, usuario_id: str, limite: int = 5):
     """
-    Búsqueda semántica inteligente ("¿Cuándo es la cena?")
+    Búsqueda semántica inteligente usando tu función original de 1 vector.
     """
     try:
         print(f"🔍 Búsqueda semántica: '{query}'")
         
-        # 1. Obtener modelo y vectorizar la pregunta
-        # Ejecutamos en un thread aparte porque model.encode bloquea el CPU
-        import asyncio
-        loop = asyncio.get_running_loop()
-        model = get_embedding_model()
+        # 1. Usar tu función original para la pregunta (es 1 solo texto)
+        query_embedding = await generar_embedding(query)
         
-        # Generar vector (embedding)
-        query_embedding = await loop.run_in_executor(None, lambda: model.encode([query])[0].tolist())
+        if not query_embedding:
+            return {"query": query, "resultados": [], "error": "No se pudo generar vector"}
         
         # 2. Consultar ChromaDB
         resultados = collection_mensajes.query(
@@ -2861,7 +2911,7 @@ async def buscar_semantica(
             n_results=limite
         )
         
-        # 3. Formatear salida limpia
+        # 3. Formatear salida
         respuestas = []
         if resultados['ids'] and resultados['ids'][0]:
             for i in range(len(resultados['ids'][0])):
@@ -2880,7 +2930,6 @@ async def buscar_semantica(
 
     except Exception as e:
         print(f"❌ Error en búsqueda semántica: {e}")
-        # Retornamos lista vacía en vez de error 500 para no romper la app cliente
         return {"query": query, "resultados": [], "error": str(e)}
 
 
@@ -2924,6 +2973,51 @@ async def tarea_programada_global():
 
 
 
+
+class ContactoSyncRequest(BaseModel):
+    numero_telefonico: str  # El ancla
+    chat_id: str
+    nombre_whatsapp: str
+
+@app.post("/nexus/directorio/sync")
+async def sincronizar_directorio_nexus(
+    request: ContactoSyncRequest,
+    authorization: str = Header(None)
+):
+    """
+    Endpoint dedicado exclusivo para que Android actualice la libreta de direcciones.
+    Asegura cero duplicados mediante UPSERT.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta Token")
+        
+    try:
+        token = authorization.split(" ")[1]
+        user_response = supabase.auth.get_user(token)
+        if not user_response.user:
+            raise HTTPException(status_code=401, detail="Token inválido")
+        USER_ID_REAL = user_response.user.id
+        
+        datos_directorio = {
+            "usuario_id": USER_ID_REAL,
+            "numero_telefonico": request.numero_telefonico, # EL ANCLA
+            "chat_id": request.chat_id,
+            "nombre_whatsapp": request.nombre_whatsapp,
+            "nombre_registrado": request.nombre_whatsapp,
+            "ultima_actualizacion": datetime.utcnow().isoformat()
+        }
+        
+        # Ejecutamos un Upsert limpio. Si el número ya existe, actualiza el nombre y chat_id
+        supabase.table('contactos_directorio').upsert(
+            datos_directorio, 
+            on_conflict='numero_telefonico, usuario_id'
+        ).execute()
+        
+        return {"status": "success", "mensaje": f"Contacto {request.nombre_whatsapp} sincronizado."}
+
+    except Exception as e:
+        print(f"❌ Error sincronizando directorio: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
