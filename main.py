@@ -25,6 +25,7 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 from faster_whisper import WhisperModel
 import tempfile
 import chromadb
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from fastapi import Header, Request, BackgroundTasks, Form
@@ -478,7 +479,9 @@ chroma_client = chromadb.PersistentClient(
 
 collection_mensajes = chroma_client.get_or_create_collection(
     name="mensajes_whatsapp",
-    metadata={"description": "Mensajes indexados para Nexus"}
+    metadata={"description": "Mensajes indexados para Nexus"},
+    embedding_function=None   # <--- ESTA ES LA MAGIA: Apaga el modelo local pesado de 400MB
+
 )
 
 
