@@ -12,9 +12,6 @@ faster-whisper==1.0.3
 ffmpeg-python==0.2.0
 pydub==0.25.1
 chromadb==0.4.22
-sentence-transformers==2.3.1
-
-sentence-transformers==2.3.1
 scikit-learn==1.4.0
 numpy==1.26.3
 python-dotenv==1.0.1
@@ -43,6 +40,7 @@ python-dateutil==2.8.2     # Parser de fechas inteligente
 phonenumbers==8.13.27      # Validación de números telefónicos
 geopy==2.4.1               # Geocodificación de direcciones
 langdetect==1.0.9          # Detección de idioma
+
 
 
 
