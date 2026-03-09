@@ -27,7 +27,7 @@ import tempfile
 import chromadb
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+
 from fastapi import Header, Request, BackgroundTasks, Form
 from itertools import groupby
 #import google.generativeai as genai
