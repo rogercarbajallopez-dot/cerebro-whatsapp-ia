@@ -2446,15 +2446,32 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                     # 🛑 2. EL FRENO DE MANO: Inyectar la pausa justo después de una llamada exitosa a Gemini
                     print("⏳ [BACKGROUND] Pausa de seguridad (4.5s) para no saturar la API gratuita...")
-                    await asyncio.sleep(4.5)
+                    await asyncio.sleep(5)
 
                 except Exception as e_ia:
-                    print(f"❌ Error procesando con Gemini: {e_ia}")
+                    error_str = str(e_ia)
+                    print(f"❌ Error procesando con Gemini: {error_str}")
                     # Si falla por límite (Error 429), puedes añadir una pausa mayor aquí para que se recupere
-                    if "429" in str(e_ia):
-                        print("⚠️ Límite alcanzado. Pausa de emergencia de 20s...")
-                        await asyncio.sleep(20)
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        # 1. Intentamos extraer los segundos exactos que pide Google ("Please retry in XX.XXXs")
+                        tiempo_espera = 60 # Default seguro: 1 minuto
                         
+                        match = re.search(r'retry in ([\d\.]+)s', error_str)
+                        if match:
+                            try:
+                                # Le sumamos 2 segundos extra de margen de seguridad
+                                tiempo_espera = float(match.group(1)) + 2.0 
+                            except:
+                                pass
+                                
+                        print(f"⚠️ Límite de cuota alcanzado (429). Pausando el procesamiento por {tiempo_espera:.1f} segundos...")
+                        await asyncio.sleep(tiempo_espera)
+                        
+                        # 2. IMPORTANTE: Usamos 'continue' para saltar al SIGUIENTE chat sin guardar datos vacíos
+                        # de este chat actual (así se volverá a procesar en la próxima sincronización)
+                        print(f"🔄 Saltando chat '{nombre_display_actual}' por ahora. Se reintentará en el futuro.")
+                        continue
+
                 # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
                     'chat_nombre': nombre_display_actual, # Actualiza si cambió de nombre ("Pancha", "Ventas 2027")
