@@ -1292,6 +1292,47 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 # ==============================================================================
 # 🧠 CEREBRO IA: MEMORIA Y VECTORES
 # ==============================================================================
+# 🔥 NUEVO: EL MOTOR EN SEGUNDO PLANO
+async def worker_cerebro_automatico():
+    """Bucle infinito que procesa silenciosamente cada 10 minutos."""
+    # Damos 10 segundos antes de arrancar por primera vez para asegurar que FastAPI y DB estén listos
+    await asyncio.sleep(10) 
+    
+    while True:
+        print("🔄 [WORKER] Iniciando ciclo de análisis IA...")
+        try:
+            # Buscar usuarios con mensajes pendientes (procesado_ia = False)
+            response = supabase.table('mensajes_whatsapp')\
+                .select('usuario_id')\
+                .eq('procesado_ia', False)\
+                .execute()
+            
+            usuarios_pendientes = list(set([row['usuario_id'] for row in response.data]))
+            
+            if not usuarios_pendientes:
+                print("💤 [WORKER] Nada nuevo. Todo al día.")
+            else:
+                print(f"🚀 [WORKER] Procesando {len(usuarios_pendientes)} usuarios con mensajes pendientes...")
+                
+                # Procesar SECUENCIALMENTE
+                for user_id in usuarios_pendientes:
+                    print(f"   -> Despertando cerebro para usuario: {user_id}")
+                    await procesar_cerebro_interno(user_id)
+                    await asyncio.sleep(5) # Pausa de cortesía entre usuarios
+
+        except Exception as e:
+            print(f"❌ [WORKER] Error en el ciclo automático: {e}")
+
+        # El reloj: Esperar 10 minutos (600 segundos)
+        print("⏳ [WORKER] Ciclo terminado. Esperando 10 minutos...")
+        await asyncio.sleep(600) 
+
+# Conectar el worker al arranque de FastAPI
+@app.on_event("startup")
+async def iniciar_tareas_programadas():
+    asyncio.create_task(worker_cerebro_automatico())
+
+
 
 async def generar_embeddings_batch(textos: list):
     """NUEVA FUNCIÓN: Usa exactamente tu misma lógica, pero para listas de textos."""
@@ -2386,23 +2427,31 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         "es_mio": m['es_mio']
                     } for m in mensajes_a_vectorizar]
 
-                    try:
-                        # Una sola llamada a la API para todos los mensajes de este chat
-                        vectores_batch = await generar_embeddings_batch(textos_batch)
-                        
-                        if vectores_batch and len(vectores_batch) == len(textos_batch):
-                            collection_mensajes.add(
-                                ids=ids_batch,
-                                embeddings=vectores_batch,
-                                documents=textos_batch,
-                                metadatas=metadatas_batch
-                            )
-                            # Imprimimos confirmación
-                            print(f"  ✅ ChromaDB: {len(vectores_batch)} vectores guardados (1 petición API).")
-                        else:
-                            print(f"  ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
-                    except Exception as e_chroma:
-                        print(f"  ⚠️ Error indexando en ChromaDB: {e_chroma}")
+                    LIMITE_BATCH = 90
+                    for i in range(0, len(textos_batch_full), LIMITE_BATCH):
+                        sub_textos = textos_batch_full[i:i + LIMITE_BATCH]
+                        sub_ids = ids_batch_full[i:i + LIMITE_BATCH]
+                        sub_metadatas = metadatas_batch_full[i:i + LIMITE_BATCH]
+
+                        try:
+                            # Una sola llamada a la API para todos los mensajes de este chat
+                            vectores_batch = await generar_embeddings_batch(textos_batch)
+                            
+                            if vectores_batch and len(vectores_batch) == len(textos_batch):
+                                collection_mensajes.add(
+                                    ids=ids_batch,
+                                    embeddings=vectores_batch,
+                                    documents=textos_batch,
+                                    metadatas=metadatas_batch
+                                )
+                                # Imprimimos confirmación
+                                print(f" ✅ ChromaDB: {len(vectores_batch)} vectores guardados (1 petición API).")
+                            else:
+                                print(f" ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
+                        except Exception as e_chroma:
+                            print(f" ⚠️ Error indexando en ChromaDB: {e_chroma}")
+                        # Pausa de cortesía para el embedding
+                        await asyncio.sleep(2)
 
                 # Prompt Gemini
                 prompt = f"""
@@ -2587,7 +2636,7 @@ async def sincronizar_batch_nexus(
 
             # 🔥 AQUÍ OCURRE LA MAGIA 🔥
             # Le decimos a FastAPI: "Cuando devuelvas el return 200, ejecuta esto"
-            background_tasks.add_task(procesar_cerebro_interno, USER_ID_REAL)
+            #background_tasks.add_task(procesar_cerebro_interno, USER_ID_REAL)
         return {
             "status": "success",
             "mode": "ingesta_rapida", # Confirmación de que no gastaste tokens
