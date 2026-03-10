@@ -2322,7 +2322,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
         
         # Asignar número telefónico (CON LA CORRECCIÓN DE GRUPOS)
         for m in mensajes:
-            numero_encontrado = mapa_identidades.get(m['chat_nombre'])
+            numero_encontrado = mapa_identidades.get(m['chat_id'])
             if numero_encontrado:
                 m['numero_telefonico'] = numero_encontrado
             else:
