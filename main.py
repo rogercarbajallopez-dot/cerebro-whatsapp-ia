@@ -2443,9 +2443,18 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         )
                     )
                     datos_ia = json.loads(response.text)
+
+                    # 🛑 2. EL FRENO DE MANO: Inyectar la pausa justo después de una llamada exitosa a Gemini
+                    print("⏳ [BACKGROUND] Pausa de seguridad (4.5s) para no saturar la API gratuita...")
+                    await asyncio.sleep(4.5)
+
                 except Exception as e_ia:
                     print(f"❌ Error procesando con Gemini: {e_ia}")
-                
+                    # Si falla por límite (Error 429), puedes añadir una pausa mayor aquí para que se recupere
+                    if "429" in str(e_ia):
+                        print("⚠️ Límite alcanzado. Pausa de emergencia de 20s...")
+                        await asyncio.sleep(20)
+                        
                 # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
                     'chat_nombre': nombre_display_actual, # Actualiza si cambió de nombre ("Pancha", "Ventas 2027")
