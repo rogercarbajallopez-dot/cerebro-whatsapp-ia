@@ -14,6 +14,7 @@ from analizador_correos import AnalizadorCorreos
 import gzip
 import pytesseract
 from PIL import Image
+from apscheduler.triggers.interval import IntervalTrigger
 import hashlib
 import httpx
 import asyncio
@@ -444,6 +445,10 @@ async def lifespan(app: FastAPI):
         CronTrigger(hour="7,9,11,14,16,18,20", minute="0", timezone="America/Lima")
     )
 
+    scheduler.add_job(
+        ejecutar_cerebro_ia, 
+        IntervalTrigger(minutes=10)
+    )
 
 
     scheduler.start()
@@ -1293,45 +1298,32 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 # 🧠 CEREBRO IA: MEMORIA Y VECTORES
 # ==============================================================================
 # 🔥 NUEVO: EL MOTOR EN SEGUNDO PLANO
-async def worker_cerebro_automatico():
-    """Bucle infinito que procesa silenciosamente cada 10 minutos."""
-    # Damos 10 segundos antes de arrancar por primera vez para asegurar que FastAPI y DB estén listos
-    await asyncio.sleep(10) 
-    
-    while True:
-        print("🔄 [WORKER] Iniciando ciclo de análisis IA...")
-        try:
-            # Buscar usuarios con mensajes pendientes (procesado_ia = False)
-            response = supabase.table('mensajes_whatsapp')\
-                .select('usuario_id')\
-                .eq('procesado_ia', False)\
-                .execute()
-            
-            usuarios_pendientes = list(set([row['usuario_id'] for row in response.data]))
-            
-            if not usuarios_pendientes:
-                print("💤 [WORKER] Nada nuevo. Todo al día.")
-            else:
-                print(f"🚀 [WORKER] Procesando {len(usuarios_pendientes)} usuarios con mensajes pendientes...")
-                
-                # Procesar SECUENCIALMENTE
-                for user_id in usuarios_pendientes:
-                    print(f"   -> Despertando cerebro para usuario: {user_id}")
-                    await procesar_cerebro_interno(user_id)
-                    await asyncio.sleep(5) # Pausa de cortesía entre usuarios
+async def ejecutar_cerebro_ia():
+    """Esta función será llamada por tu Scheduler cada 10 minutos."""
+    print("🔄 [SCHEDULER] Iniciando ciclo de análisis IA (Cerebro)...")
+    try:
+        # Buscar usuarios con mensajes pendientes (procesado_ia = False)
+        response = supabase.table('mensajes_whatsapp')\
+            .select('usuario_id')\
+            .eq('procesado_ia', False)\
+            .execute()
+        
+        usuarios_pendientes = list(set([row['usuario_id'] for row in response.data]))
+        
+        if not usuarios_pendientes:
+            print("💤 [SCHEDULER] Nada nuevo. Cerebro en reposo.")
+            return
 
-        except Exception as e:
-            print(f"❌ [WORKER] Error en el ciclo automático: {e}")
+        print(f"🚀 [SCHEDULER] Procesando {len(usuarios_pendientes)} usuarios con mensajes pendientes...")
+        
+        for user_id in usuarios_pendientes:
+            print(f"   -> Despertando cerebro para usuario: {user_id}")
+            # Llama a tu función principal (la que arreglamos en el mensaje anterior)
+            await procesar_cerebro_interno(user_id)
+            await asyncio.sleep(5) # Pausa de cortesía entre usuarios
 
-        # El reloj: Esperar 10 minutos (600 segundos)
-        print("⏳ [WORKER] Ciclo terminado. Esperando 10 minutos...")
-        await asyncio.sleep(600) 
-
-# Conectar el worker al arranque de FastAPI
-@app.on_event("startup")
-async def iniciar_tareas_programadas():
-    asyncio.create_task(worker_cerebro_automatico())
-
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Error en el ciclo del Cerebro: {e}")
 
 
 async def generar_embeddings_batch(textos: list):
@@ -2428,10 +2420,10 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     } for m in mensajes_a_vectorizar]
 
                     LIMITE_BATCH = 90
-                    for i in range(0, len(textos_batch_full), LIMITE_BATCH):
-                        sub_textos = textos_batch_full[i:i + LIMITE_BATCH]
-                        sub_ids = ids_batch_full[i:i + LIMITE_BATCH]
-                        sub_metadatas = metadatas_batch_full[i:i + LIMITE_BATCH]
+                    for i in range(0, len(textos_batch), LIMITE_BATCH):
+                        sub_textos = textos_batch[i:i + LIMITE_BATCH]
+                        sub_ids = ids_batch[i:i + LIMITE_BATCH]
+                        sub_metadatas = metadatas_batch[i:i + LIMITE_BATCH]
 
                         try:
                             # Una sola llamada a la API para todos los mensajes de este chat
