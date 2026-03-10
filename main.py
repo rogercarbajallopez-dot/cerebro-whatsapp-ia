@@ -2379,9 +2379,9 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             ids_a_procesar = [m['id'] for m in lista_mensajes]
             
             # Filtro de ruido
-            if len(lista_mensajes) < 2 and len(texto_total) < 10:
-                supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
-                continue
+            #if len(lista_mensajes) < 2 and len(texto_total) < 10:
+                #supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
+                #continue
 
             print(f"🤖 [BACKGROUND] Analizando chat: {nombre_display_actual} (Ancla: {numero_tel}) ({len(lista_mensajes)} msgs)")
             
@@ -2428,7 +2428,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         try:
                             # Una sola llamada a la API para todos los mensajes de este chat
                             vectores_batch = await generar_embeddings_batch(textos_batch)
-                            
+                            await asyncio.sleep(2)
                             if vectores_batch and len(vectores_batch) == len(textos_batch):
                                 collection_mensajes.add(
                                     ids=ids_batch,
@@ -2438,12 +2438,13 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                                 )
                                 # Imprimimos confirmación
                                 print(f" ✅ ChromaDB: {len(vectores_batch)} vectores guardados (1 petición API).")
+                                # Pausa de cortesía para el embedding
+                            
                             else:
                                 print(f" ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
                         except Exception as e_chroma:
                             print(f" ⚠️ Error indexando en ChromaDB: {e_chroma}")
-                        # Pausa de cortesía para el embedding
-                        await asyncio.sleep(2)
+                        
 
                 # Prompt Gemini
                 prompt = f"""
@@ -2485,33 +2486,15 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     )
                     datos_ia = json.loads(response.text)
 
-                    # 🛑 2. EL FRENO DE MANO: Inyectar la pausa justo después de una llamada exitosa a Gemini
-                    print("⏳ [BACKGROUND] Pausa de seguridad (4.5s) para no saturar la API gratuita...")
-                    await asyncio.sleep(5)
-
                 except Exception as e_ia:
                     error_str = str(e_ia)
-                    print(f"❌ Error procesando con Gemini: {error_str}")
-                    # Si falla por límite (Error 429), puedes añadir una pausa mayor aquí para que se recupere
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                        # 1. Intentamos extraer los segundos exactos que pide Google ("Please retry in XX.XXXs")
-                        tiempo_espera = 60 # Default seguro: 1 minuto
-                        
-                        match = re.search(r'retry in ([\d\.]+)s', error_str)
-                        if match:
-                            try:
-                                # Le sumamos 2 segundos extra de margen de seguridad
-                                tiempo_espera = float(match.group(1)) + 2.0 
-                            except:
-                                pass
-                                
-                        print(f"⚠️ Límite de cuota alcanzado (429). Pausando el procesamiento por {tiempo_espera:.1f} segundos...")
-                        await asyncio.sleep(tiempo_espera)
-                        
-                        # 2. IMPORTANTE: Usamos 'continue' para saltar al SIGUIENTE chat sin guardar datos vacíos
-                        # de este chat actual (así se volverá a procesar en la próxima sincronización)
-                        print(f"🔄 Saltando chat '{nombre_display_actual}' por ahora. Se reintentará en el futuro.")
-                        continue
+                        # 🛑 Inyectamos el "aborto" por cuota para proteger el sistema
+                        print(f"🛑 Límite de cuota alcanzado. Deteniendo procesamiento para evitar errores mayores.")
+                        return {"status": "error", "mensaje": "Cuota agotada, se reintentará en el próximo ciclo."}
+                    
+                    print(f"❌ Error procesando con Gemini: {error_str}")
+                    continue
 
                 # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
@@ -2550,6 +2533,9 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             except Exception as e_chat:
                 print(f"❌ Error general en chat {nombre_display_actual}: {e_chat}")
                 continue
+
+            print(f"💤 Esperando 7s para proteger API antes del siguiente chat...")
+            await asyncio.sleep(7)
                 
         print(f"✅ [BACKGROUND] Cerebro finalizó con éxito para {usuario_id_real}")
         return {"status": "success", "resumen": resultados_log}
