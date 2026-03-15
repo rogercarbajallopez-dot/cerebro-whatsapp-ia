@@ -1,6 +1,6 @@
-# ====================================================
+
 # WHATSAPP IA 19.0 - CON AUTENTICACIÓN COMPLETA
-# ====================================================
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status, Body, Request
@@ -12,11 +12,14 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from analizador_correos import AnalizadorCorreos
 import gzip
+import difflib
 import pytesseract
 from PIL import Image
 from apscheduler.triggers.interval import IntervalTrigger
 import hashlib
 import httpx
+from patron_engine import guardar_observacion
+
 import asyncio
 # --- FIX PARA CHROMADB EN RENDER/LINUX ---
 import sys
@@ -333,6 +336,41 @@ def detectar_mime_real(nombre: str, mime: str) -> str:
 # ==============================================================================
 scheduler = AsyncIOScheduler()
 
+# --- [INSERCIÓN QUIRÚRGICA: PASO 5 (Wrappers)] ---
+async def _job_detectar_patrones():
+    """Batch semanal: analiza timestamps reales de mensajes_whatsapp."""
+    from patron_engine import detectar_patrones_temporales
+    try:
+        usuarios = supabase.table('usuarios').select('id').execute()
+        for u in (usuarios.data or []):
+            await detectar_patrones_temporales(supabase, u['id'])
+            await asyncio.sleep(3)
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Error job detectar patrones: {e}")
+
+async def _job_patrones_incrementales():
+    """Incremental diario: procesa alertas tarea_ia de las últimas 24h."""
+    from patron_engine import procesar_patrones_incrementales
+    try:
+        usuarios = supabase.table('usuarios').select('id').execute()
+        for u in (usuarios.data or []):
+            await procesar_patrones_incrementales(supabase, u['id'])
+            await asyncio.sleep(2)
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Error job patrones incrementales: {e}")
+
+async def _job_proponer_acciones():
+    """Cada hora: propone acciones predictivas si hay patrones en ventana."""
+    from patron_engine import proponer_accion_predictiva
+    try:
+        usuarios = supabase.table('usuarios').select('id, fcm_token').execute()
+        for u in (usuarios.data or []):
+            if u.get('fcm_token'):
+                await proponer_accion_predictiva(supabase, u['id'], enviar_push)
+    except Exception as e:
+        print(f"❌ [SCHEDULER] Error job proponer acciones: {e}")
+# ---------------------------------------------------
+
 async def generar_briefing(tipo: str):
     """
     tipo="matutino": Prioridad a lo de HOY (Urgente).
@@ -447,9 +485,26 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_job(
         ejecutar_cerebro_ia, 
-        IntervalTrigger(minutes=10)
+        IntervalTrigger(minutes=30)
     )
 
+    # --- [INSERCIÓN QUIRÚRGICA: PASO 5 (Registrar Jobs)] ---
+    # Job 1: Batch semanal (domingo 3am)
+    scheduler.add_job(
+        _job_detectar_patrones,
+        CronTrigger(day_of_week='sun', hour=3, minute=0, timezone='America/Lima')
+    )
+    # Job 2: Incremental cada 4 horas
+    scheduler.add_job(
+        _job_patrones_incrementales,
+        CronTrigger(hour='*/4', minute=30, timezone='America/Lima')
+    )
+    # Job 3: Predicción cada hora
+    scheduler.add_job(
+        _job_proponer_acciones,
+        CronTrigger(minute=0, timezone='America/Lima')
+    )
+    # -------------------------------------------------------
 
     scheduler.start()
     # --- FIN SCHEDULER ---
@@ -1212,11 +1267,46 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
                 .limit(15)\
                 .execute()
 
+
+            # --- [INSERCIÓN QUIRÚRGICA: PASO 4 (Correos y Chats)] ---
+            res_correos_pendientes = supabase.table('correos_analizados')\
+                .select('remitente, asunto, urgencia, fecha_limite')\
+                .eq('usuario_id', usuario_id)\
+                .eq('requiere_accion', True)\
+                .eq('leido', False)\
+                .order('score_importancia', desc=True)\
+                .limit(5)\
+                .execute()
+
+            res_memoria_reciente = supabase.table('memoria_chats')\
+                .select('chat_nombre, resumen_actual, temas_abiertos, ultima_actualizacion')\
+                .eq('usuario_id', usuario_id)\
+                .order('ultima_actualizacion', desc=True)\
+                .limit(8)\
+                .execute()
+            # --------------------------------------------------------
+
+
             pendientes_txt = "\n".join([f"- [PENDIENTE] {a['titulo']} ({a.get('descripcion','')})" for a in res_alertas.data]) if res_alertas.data else "No hay pendientes."
             reciente_txt = "\n".join([f"- [HACE POCO: {c['created_at'][:10]}] {c['resumen']}" for c in res_recent.data]) if res_recent.data else ""
             
             contexto_bd = f"PENDIENTES AHORA:\n{pendientes_txt}\n\nCONTEXTO RECIENTE:\n{reciente_txt}"
 
+            # --- [INSERCIÓN QUIRÚRGICA: PASO 4 (Agregar al contexto)] ---
+            if res_correos_pendientes.data:
+                correos_txt = "\nCORREOS PENDIENTES:\n" + "\n".join([
+                    f"- [{c.get('urgencia','?').upper()}] De: {c['remitente']} | {c.get('asunto','sin asunto')}"
+                    for c in res_correos_pendientes.data
+                ])
+                contexto_bd += correos_txt
+
+            if res_memoria_reciente.data:
+                mem_txt = "\nCHATS RECIENTES (por contacto):\n" + "\n".join([
+                    f"- {m['chat_nombre']}: {(m.get('resumen_actual') or '')[:100]}"
+                    for m in res_memoria_reciente.data
+                ])
+                contexto_bd += mem_txt
+            # --------------------------------------------------------
         # 🔥 NUEVO: AGREGAR ESTO - BUSCADOR DE MEMORIA INTELIGENTE
         # Buscamos en la base de datos recuerdos que se parezcan al tema que habla el usuario
         memoria_vectorial = ""
@@ -1416,34 +1506,88 @@ async def generar_embedding(texto: str):
         return None
 
 async def buscar_contexto_historico(usuario_id: str, consulta: str):
-    """Busca conversaciones pasadas similares a la consulta actual"""
+    """
+    FUENTE 1: Conversaciones vectoriales (RPC existente, sin cambio).
+    FUENTE 2: Correos históricos por keyword (SQL, sin IA).
+    FUENTE 3: Memoria de chats por keyword (SQL, sin IA).
+    """
+    contexto_total = ""
+    palabras = [p for p in consulta.lower().split() if len(p) > 3][:4]
+
+    # FUENTE 1: tu lógica vectorial original intacta
     vector_consulta = await generar_embedding(consulta)
-    if not vector_consulta: return ""
+    if vector_consulta:
+        try:
+            res = supabase.rpc('match_conversaciones', {
+                'query_embedding':  vector_consulta,
+                'match_threshold':  0.6,
+                'match_count':      3,
+                'p_usuario_id':     usuario_id
+            }).execute()
+            if res.data:
+                contexto_total += "\n🔍 MEMORIA HISTÓRICA:\n"
+                for item in res.data:
+                    contexto_total += f"- {item.get('resumen','')}\n"
+        except Exception as e:
+            print(f"⚠️ Error vectores: {e}")
 
-    try:
-        # Llamamos a la función RPC 'match_conversaciones' que creaste en SQL
-        res = supabase.rpc(
-            'match_conversaciones', 
-            {
-                'query_embedding': vector_consulta,
-                'match_threshold': 0.6, # 60% de similitud mínima
-                'match_count': 3,       # Traer los 3 recuerdos más relevantes
-                'p_usuario_id': usuario_id
-            }
-        ).execute()
-        
-        if not res.data: return ""
+    # FUENTE 2: Correos históricos por keyword (SQL puro, sin IA)
+    if palabras:
+        try:
+            res_c = supabase.table('correos_analizados')\
+                .select('remitente, asunto, tono_detectado, fecha, categoria')\
+                .eq('usuario_id', usuario_id)\
+                .order('fecha', desc=True)\
+                .limit(30)\
+                .execute()
 
-        contexto = "\n🔍 MEMORIA HISTÓRICA:\n"
-        for item in res.data:
-            # Asumiendo que tu tabla conversaciones tiene columna 'resumen'
-            resumen = item.get('resumen', 'Sin resumen')
-            contexto += f"- {resumen}\n"
-            
-        return contexto
-    except Exception as e:
-        print(f"❌ Error buscando memoria: {e}")
-        return ""
+            relevantes = [
+                c for c in (res_c.data or [])
+                if any(p in (c.get('asunto','') + c.get('remitente','')).lower()
+                       for p in palabras)
+            ][:4]
+
+            if relevantes:
+                contexto_total += "\n📧 CORREOS RELACIONADOS:\n"
+                for c in relevantes:
+                    contexto_total += (
+                        f"- [{str(c.get('fecha',''))[:10]}] "
+                        f"{c['remitente']} | {c.get('asunto','')} "
+                        f"| tono: {c.get('tono_detectado','?')}\n"
+                    )
+        except Exception as e:
+            print(f"⚠️ Error correos históricos: {e}")
+
+    # FUENTE 3: Memoria de chats por keyword (SQL puro, sin IA)
+    if palabras:
+        try:
+            res_m = supabase.table('memoria_chats')\
+                .select('chat_nombre, resumen_actual, temas_abiertos')\
+                .eq('usuario_id', usuario_id)\
+                .order('ultima_actualizacion', desc=True)\
+                .limit(20)\
+                .execute()
+
+            relevantes_m = [
+                m for m in (res_m.data or [])
+                if any(p in (
+                    m.get('chat_nombre','') + ' ' +
+                    (m.get('resumen_actual') or '') + ' ' +
+                    (m.get('temas_abiertos') or '')
+                ).lower() for p in palabras)
+            ][:3]
+
+            if relevantes_m:
+                contexto_total += "\n💬 CHATS RELACIONADOS:\n"
+                for m in relevantes_m:
+                    contexto_total += (
+                        f"- {m['chat_nombre']}: "
+                        f"{(m.get('resumen_actual') or '')[:100]}\n"
+                    )
+        except Exception as e:
+            print(f"⚠️ Error memoria chats: {e}")
+
+    return contexto_total
 
 def limpiar_json_gemini(texto_sucio: str) -> dict:
     """
@@ -2337,6 +2481,19 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             return {"status": "sleep", "mensaje": "No hay mensajes nuevos."}
             
         resultados_log = []
+        # --- [INSERCIÓN 1 QUIRÚRGICA: Cargar perfil del YO] ---
+        perfil_yo = ""
+        try:
+            res_perfil_yo = supabase.table('perfil_usuario')\
+                .select('dato')\
+                .eq('usuario_id', usuario_id_real)\
+                .execute()
+            if res_perfil_yo.data:
+                perfil_yo = "; ".join([p['dato'] for p in res_perfil_yo.data[:10]])
+        except Exception as e_perfil:
+            print(f"⚠️ Aviso: No se pudo cargar el perfil del usuario: {e_perfil}")
+            pass
+
 
         # ---------------------------------------------------------
         # 🧠 CAPA DE RESOLUCIÓN DE IDENTIDAD (DIRECTORIO + GRUPOS)
@@ -2449,7 +2606,9 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 # Prompt Gemini
                 prompt = f"""
 
-                Actúa como un Analista de Datos Personales experto.
+                Actúa como un Analista de Comportamiento Personales experto.
+                PERFIL DEL USUARIO (QUIÉN ES ROGER):
+                "{perfil_yo}"
                 CONTEXTO ANTERIOR (Resumen de lo hablado antes):
                 "{contexto_previo}"
                 NUEVA CONVERSACIÓN (Mensajes recientes):
@@ -2461,7 +2620,13 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 - "titulo": Breve (ej: "Comprar leche")
                 - "descripcion": Detalles (ej: "Marca X, para mañana")
                 - "prioridad": "ALTA", "MEDIA" o "BAJA"
+                - "intencion_nativa" (ej: "reunion_virtual", "solicitud_documento", "pago")
+                - "hora_del_evento" (HH:MM si se menciona, null si no). 
                 3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
+                4. "observaciones_usuario": Lista de observaciones sobre el usuario en esta conversación. 
+                    - Cada una: {{"dimension": "vocabulario|tono|humor|nivel_formalidad|reaccion_al_conflicto|patron_horario|estilo_demanda|afecto|frases_caracteristicas|jerarquia", "sujeto": "usuario", "observacion": "texto", "evidencia": ["frases textuales"], "peso": 0.5}}
+                5. "observaciones_contacto": Lista de observaciones sobre {nombre_display_actual}. Misma estructura, sujeto: "contacto".
+
                 IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
                 """
 
@@ -2512,6 +2677,44 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     on_conflict='numero_telefonico, usuario_id'
                 ).execute()
 
+                # --- [INSERCIÓN 3 QUIRÚRGICA: Guardar observaciones y perfiles sintéticos] ---
+                obs_usuario   = datos_ia.get('observaciones_usuario', [])
+                obs_contacto  = datos_ia.get('observaciones_contacto', [])
+                
+                for obs in obs_usuario + obs_contacto:
+                    if obs.get('observacion'):
+                        await guardar_observacion(
+                            supabase,
+                            usuario_id_real,
+                            numero_tel,
+                            'whatsapp',
+                            obs.get('sujeto', 'usuario'),
+                            obs.get('dimension', 'general'),
+                            obs['observacion'],
+                            obs.get('evidencia', []),
+                            float(obs.get('peso', 0.5))
+                        )
+
+                # Actualizar perfil sintético en memoria_chats
+                if obs_usuario or obs_contacto:
+                    supabase.table('memoria_chats').update({
+                        'perfil_sintetico_usuario': {
+                            'dimensiones': [
+                                {'d': o.get('dimension'), 'obs': o.get('observacion'), 'p': o.get('peso', 0.5)}
+                                for o in obs_usuario[:8]
+                            ]
+                        },
+                        'perfil_sintetico_contacto': {
+                            'dimensiones': [
+                                {'d': o.get('dimension'), 'obs': o.get('observacion'), 'p': o.get('peso', 0.5)}
+                                for o in obs_contacto[:8]
+                            ]
+                        },
+                    }).eq('numero_telefonico', numero_tel)\
+                      .eq('usuario_id', usuario_id_real)\
+                      .execute()
+                # ------------------------------------------------------
+
                 # Guardar Tareas Detectadas
                 tareas_detectadas = datos_ia.get('tareas', [])
                 for tarea in tareas_detectadas:
@@ -2521,7 +2724,14 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         'descripcion': f"Origen: {nombre_display_actual}. {tarea.get('descripcion', '')}",
                         'tipo': 'tarea_ia',
                         'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
-                        'metadata': {'origen': 'whatsapp_cerebro', 'chat': nombre_display_actual, 'telefono': numero_tel}
+                        'metadata': {
+                            'origen': 'whatsapp_cerebro', 
+                            'chat': nombre_display_actual, 
+                            'telefono': numero_tel,
+                            'numero_telefonico': numero_tel,
+                            'intencion_nativa': tarea.get('intencion_nativa', ''),
+                            'hora_del_evento': tarea.get('hora_del_evento')
+                        }
                     }).execute()
 
                 # Marcar mensajes como procesados
@@ -2660,10 +2870,20 @@ async def activar_cerebro_inteligente(authorization: str = Header(None)):
 
 # main.py - AÑADIR NUEVO ENDPOINT
 @app.get("/nexus/estadisticas/{usuario_id}")
-async def obtener_estadisticas_nexus(usuario_id: str):
+async def obtener_estadisticas_nexus(
+    usuario_id: str,
+    usuario_autenticado: str = Depends(obtener_usuario_actual)
+):
     """
     Obtiene estadísticas de mensajes de WhatsApp procesados para Flutter
     """
+    # Validación de seguridad: El usuario solo puede consultar sus propios datos
+    if usuario_id != usuario_autenticado:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="No tienes permiso para ver las estadísticas de otro usuario"
+        )
+        
     try:
         # 1. Total de mensajes
         total_mensajes = supabase.table('mensajes_whatsapp')\
@@ -2684,7 +2904,7 @@ async def obtener_estadisticas_nexus(usuario_id: str):
         alertas = supabase.table('alertas')\
             .select('*', count='exact')\
             .eq('usuario_id', usuario_id)\
-            .eq('tipo', 'urgente_whatsapp')\
+            .in_('tipo', ['tarea_ia', 'prediccion_ia'])\
             .execute()
             
         # 4. Chats activos (Contamos nombres únicos)
@@ -3076,8 +3296,254 @@ async def sincronizar_directorio_nexus(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class FeedbackSugerenciaRequest(BaseModel):
+    alerta_id: str
+    numero_telefonico: str
+    canal: str                    # 'whatsapp' | 'email'
+    accion: str                   # 'aprobada' | 'editada' | 'descartada'
+    respuesta_final: str = ""     # Lo que Roger realmente envió (si editó)
+
+@app.post("/nexus/feedback-sugerencia")
+async def feedback_sugerencia(
+    req: FeedbackSugerenciaRequest,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Registra el feedback del usuario sobre una sugerencia.
+    - Aprobada: refuerza las observaciones usadas (confirmaciones++)
+    - Editada: aprende de la diferencia entre sugerido y enviado
+    - Descartada: penaliza las observaciones, registra nueva observación
+    """
+    try:
+        
+
+        # Obtener la sugerencia original de la alerta
+        alerta_res = supabase.table('alertas')\
+            .select('metadata')\
+            .eq('id', req.alerta_id)\
+            .execute()
+
+        if not alerta_res.data:
+            raise HTTPException(status_code=404, detail="Alerta no encontrada")
+
+        meta = alerta_res.data[0].get('metadata', {})
+        respuesta_sugerida = meta.get('respuesta_sugerida', '')
+        tono_sugerido = meta.get('tono_sugerido', '')
+
+        if req.accion == 'aprobada':
+            # El tono/estilo era correcto — reforzar
+            if tono_sugerido:
+                await guardar_observacion(
+                    supabase, usuario_id, req.numero_telefonico, req.canal,
+                    'usuario', 'tono_aprobado',
+                    f"Roger aprobó respuesta con tono {tono_sugerido} para este contacto",
+                    [respuesta_sugerida[:100]],
+                    peso=0.90
+                )
+
+        elif req.accion == 'editada' and req.respuesta_final:
+            # Aprendemos de la diferencia
+            # Si la edición fue menor (similitud alta), el tono era correcto
+            
+            sim = difflib.SequenceMatcher(
+                None, respuesta_sugerida.lower(), req.respuesta_final.lower()
+            ).ratio()
+
+            if sim >= 0.75:
+                # Edición menor — tono correcto, solo ajuste de palabras
+                await guardar_observacion(
+                    supabase, usuario_id, req.numero_telefonico, req.canal,
+                    'usuario', 'estilo_comunicacion',
+                    f"Roger prefiere ajustar ligeramente las sugerencias antes de enviar",
+                    [req.respuesta_final[:100]],
+                    peso=0.70
+                )
+            else:
+                # Edición mayor — la sugerencia era bastante diferente a lo que Roger quería
+                await guardar_observacion(
+                    supabase, usuario_id, req.numero_telefonico, req.canal,
+                    'usuario', 'estilo_preferido_real',
+                    f"Roger prefiere este estilo con este contacto: {req.respuesta_final[:80]}",
+                    [req.respuesta_final[:150]],
+                    peso=0.85
+                )
+                # También aprendemos del contacto: si Roger cambió mucho el tono,
+                # el perfil del contacto necesita revisión
+                await guardar_observacion(
+                    supabase, usuario_id, req.numero_telefonico, req.canal,
+                    'contacto', 'perfil_necesita_revision',
+                    f"El perfil de este contacto generó una sugerencia incorrecta — revisar observaciones",
+                    [],
+                    peso=0.40  # peso bajo = señal de revisión, no certeza
+                )
+
+        elif req.accion == 'descartada':
+            # La sugerencia estaba completamente fuera de lugar
+            await guardar_observacion(
+                supabase, usuario_id, req.numero_telefonico, req.canal,
+                'contacto', 'sugerencia_rechazada',
+                f"Roger descartó la sugerencia completa para este contacto — perfil de contacto impreciso",
+                [respuesta_sugerida[:100]],
+                peso=0.30  # señal débil pero registrada
+            )
+
+        # Actualizar estado de la alerta con el resultado del feedback
+        supabase.table('alertas').update({
+            'metadata': meta | {
+                'feedback_accion': req.accion,
+                'respuesta_final_enviada': req.respuesta_final,
+                'feedback_registrado_en': datetime.utcnow().isoformat(),
+            },
+            'estado': 'completada' if req.accion in ['aprobada', 'editada'] else 'descartada',
+            'updated_at': datetime.utcnow().isoformat(),
+        }).eq('id', req.alerta_id).execute()
+
+        return {
+            "status": "success",
+            "accion_registrada": req.accion,
+            "aprendizaje": "observaciones actualizadas correctamente"
+        }
+
+    except Exception as e:
+        print(f"❌ Error en feedback-sugerencia: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+
+
+@app.post("/nexus/sugerir-respuesta")
+async def sugerir_respuesta(
+    alerta_id: str,
+    numero_telefonico: str,
+    canal: str = "whatsapp",
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    """
+    Devuelve la sugerencia ya guardada + perfil del contacto.
+    NO llama a Gemini. Lee solo de BD.
+    """
+    try:
+        # 1. Leer la alerta o correo para obtener respuesta_sugerida ya generada
+        # Para correos: correos_analizados. Para WhatsApp: alertas con metadata
+        respuesta_existente = ""
+        asunto_o_titulo     = ""
+
+        # Intentar correo primero
+        correo_res = supabase.table('correos_analizados')\
+            .select('respuesta_sugerida, asunto, tono_detectado, remitente')\
+            .eq('id', alerta_id)\
+            .execute()
+
+        if correo_res.data:
+            r = correo_res.data[0]
+            respuesta_existente = r.get('respuesta_sugerida', '')
+            asunto_o_titulo     = r.get('asunto', '')
+            tono_detectado      = r.get('tono_detectado', '')
+        else:
+            # WhatsApp: buscar en alertas
+            alerta_res = supabase.table('alertas')\
+                .select('titulo, descripcion, metadata')\
+                .eq('id', alerta_id)\
+                .execute()
+            if alerta_res.data:
+                a = alerta_res.data[0]
+                asunto_o_titulo = a.get('titulo', '')
+                tono_detectado  = ''
+                # Para WhatsApp no hay respuesta_sugerida preexistente aún
+                respuesta_existente = ""
+
+        # 2. Cargar observaciones del contacto (sin IA)
+        obs_res = supabase.table('patron_observaciones')\
+            .select('dimension, observacion, sujeto, peso')\
+            .eq('usuario_id', usuario_id)\
+            .eq('numero_telefonico', numero_telefonico)\
+            .gte('peso', 0.50)\
+            .order('peso', desc=True)\
+            .limit(12)\
+            .execute()
+
+        obs_contacto = [o for o in (obs_res.data or []) if o['sujeto'] == 'contacto']
+        obs_usuario  = [o for o in (obs_res.data or []) if o['sujeto'] == 'usuario']
+
+        # 3. Cargar memoria del chat
+        mem_res = supabase.table('memoria_chats')\
+            .select('resumen_actual, temas_abiertos')\
+            .eq('usuario_id', usuario_id)\
+            .eq('numero_telefonico', numero_telefonico)\
+            .execute()
+        memoria = mem_res.data[0] if mem_res.data else {}
+
+        # 4. Si ya hay respuesta_sugerida guardada (correo), devolverla directo
+        if respuesta_existente:
+            return {
+                "status":             "success",
+                "fuente":             "cached",  # indica que no gastó tokens
+                "respuesta_sugerida": respuesta_existente,
+                "tono_usado":         tono_detectado,
+                "perfil_contacto":    [{"dim": o['dimension'], "obs": o['observacion']}
+                                       for o in obs_contacto[:5]],
+                "observaciones_usadas": len(obs_contacto),
+                "resumen_relacion":   memoria.get('resumen_actual', '')[:200],
+            }
+
+        # 5. Solo para WhatsApp sin sugerencia: generar UNA llamada a Gemini
+        # usando el contexto ya cargado (no vuelve a leer BD)
+        if not respuesta_existente and obs_contacto:
+            perfil_yo_res = supabase.table('perfil_usuario')\
+                .select('dato').eq('usuario_id', usuario_id).execute()
+            perfil_yo = "; ".join([p['dato'] for p in (perfil_yo_res.data or [])[:8]])
+
+            obs_c_txt = "\n".join(
+                f"- [{o['dimension']}] {o['observacion']}"
+                for o in obs_contacto[:6]
+            )
+            obs_u_txt = "\n".join(
+                f"- [{o['dimension']}] {o['observacion']}"
+                for o in obs_usuario[:4]
+            )
+
+            prompt = f"""Redacta una respuesta para este mensaje de WhatsApp.
+Sé conciso. Adapta el tono al perfil del contacto.
+
+QUIÉN ES ROGER: {perfil_yo}
+CÓMO ROGER HABLA CON ESTE CONTACTO: {obs_u_txt}
+PERFIL DEL CONTACTO: {obs_c_txt}
+HISTORIAL: {memoria.get('resumen_actual','')[:150]}
+MENSAJE A RESPONDER: "{asunto_o_titulo}"
+
+JSON: {{"respuesta": "texto listo para enviar", "tono": "formal|informal|afectivo"}}"""
+
+            global gemini_client
+            if not gemini_client:
+                gemini_client = genai.Client(api_key=API_KEY_GOOGLE)
+
+            resp = gemini_client.models.generate_content(
+                model=MODELO_IA, contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", temperature=0.3
+                )
+            )
+            resultado = json.loads(resp.text)
+            return {
+                "status":             "success",
+                "fuente":             "generated",
+                "respuesta_sugerida": resultado.get('respuesta', ''),
+                "tono_usado":         resultado.get('tono', ''),
+                "observaciones_usadas": len(obs_contacto),
+            }
+
+        # 6. Sin observaciones suficientes: respuesta genérica sin IA
+        return {
+            "status":             "sin_perfil",
+            "fuente":             "sin_datos",
+            "respuesta_sugerida": "",
+            "mensaje":            "Aún no hay suficientes observaciones de este contacto.",
+            "observaciones_usadas": 0,
+        }
+
+    except Exception as e:
+        print(f"❌ Error sugerir-respuesta: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
