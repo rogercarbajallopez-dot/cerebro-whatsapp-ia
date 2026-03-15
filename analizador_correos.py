@@ -11,6 +11,8 @@ import time
 from google.genai import types
 import json
 import gc  # 🧹 IMPORTACIÓN DEL RECOLECTOR DE BASURA
+from patron_engine import guardar_observacion
+
 class AnalizadorCorreos:
     """
     Motor de análisis de correos con optimización de costos.
@@ -31,11 +33,11 @@ class AnalizadorCorreos:
         
         # Palabras clave de ACCIÓN (requieren análisis profundo)
         self.triggers_accion = {
-            'urgente': ['urgente', 'prioridad', 'inmediato', 'cuanto antes', 'hoy', 'deadline'],
-            'laboral': ['entrevista', 'oferta', 'vacante', 'postulación', 'proceso de selección', 'segunda etapa'],
-            'academico': ['tarea', 'examen', 'proyecto', 'entrega', 'plazo', 'calificación'],
-            'legal': ['contrato', 'firma', 'documento', 'trámite', 'constancia', 'certificado'],
-            'financiero': ['factura', 'pago', 'vencimiento', 'cobro', 'transferencia', 'deuda']
+            'urgente': ['urgente', 'prioridad', 'inmediato', 'cuanto antes', 'hoy', 'deadline', 'asap', 'pendiente'],
+            'laboral': ['entrevista', 'oferta', 'vacante', 'postulación', 'proceso de selección', 'segunda etapa', 'selección', 'cierre', 'contabilidad', 'formato', 'adjunto', 'adjuntar', 'enviar', 'reporte'],
+            'academico': ['tarea', 'examen', 'proyecto', 'entrega', 'plazo', 'calificación', 'calificación', 'trabajo'],
+            'legal': ['contrato', 'firma', 'documento', 'trámite', 'constancia', 'certificado', 'anexos', 'legal'],
+            'financiero': ['factura', 'pago', 'vencimiento', 'cobro', 'transferencia', 'deuda', 'depósito', 'cotización']
         }
         
     # ================================================================
@@ -131,6 +133,10 @@ class AnalizadorCorreos:
         if '<img' not in cuerpo and len(cuerpo) < 2000:
             score += 10
         
+        # +15 Salvavidas: Si es corto, tiene archivos (menciona adjunto/formato/anexo) y pide algo.
+        if any(w in cuerpo for w in ['adjunt', 'formato', 'anexo', 'documento', 'enviar']):
+            score += 15
+
         # -20 si tiene "unsubscribe" (newsletters)
         if 'unsubscribe' in cuerpo or 'darse de baja' in cuerpo:
             score -= 20
@@ -277,7 +283,14 @@ class AnalizadorCorreos:
                 contexto_hist += "\n📧 ÚLTIMOS CORREOS:\n"
                 for h in historial_remitente[-3:]:
                     contexto_hist += f"- [{h.get('fecha', 'N/A')}] {h.get('asunto', 'Sin asunto')}\n"
-        
+
+            # --- [INSERCIÓN QUIRÚRGICA: PASO 2 (Inyectar al Prompt)] ---
+            obs_c = contexto_adicional.get('obs_contacto_txt', '')
+            obs_u = contexto_adicional.get('obs_usuario_txt', '')
+            if obs_c or obs_u:
+                contexto_hist += f"\n{obs_c}\n{obs_u}\n"
+            # -----------------------------------------------------------
+
         # Acumular el texto para este correo en el súper-prompt
             textos_prompt += f"""
                 --- ID_CORREO: {item['id_correo']} ---
@@ -424,6 +437,37 @@ class AnalizadorCorreos:
             # Último contacto
             ultimo = historial.data[0].get('fecha', 'Desconocido')
             
+            # --- [INSERCIÓN QUIRÚRGICA: PASO 1 (Cargar Observaciones)] ---
+            obs_contacto_txt = ""
+            obs_usuario_txt  = ""
+            try:
+                # Nota: usamos 'numero_telefonico' como identificador del remitente según tu esquema actual
+                obs_res = supabase_client.table('patron_observaciones')\
+                    .select('dimension, observacion, sujeto, peso')\
+                    .eq('usuario_id', usuario_id)\
+                    .eq('numero_telefonico', remitente)\
+                    .gte('peso', 0.55)\
+                    .order('peso', desc=True)\
+                    .limit(10)\
+                    .execute()
+
+                if obs_res.data:
+                    obs_contacto = [o for o in obs_res.data if o['sujeto'] == 'contacto']
+                    obs_usuario  = [o for o in obs_res.data if o['sujeto'] == 'usuario']
+
+                    if obs_contacto:
+                        obs_contacto_txt = "PERFIL DEL CONTACTO (aprendido):\n" + "\n".join(
+                            f"- [{o['dimension']}] {o['observacion']}"
+                            for o in obs_contacto[:5]
+                        )
+                    if obs_usuario:
+                        obs_usuario_txt = "CÓMO EL USUARIO RESPONDE A ESTE CONTACTO:\n" + "\n".join(
+                            f"- [{o['dimension']}] {o['observacion']}"
+                            for o in obs_usuario[:5]
+                        )
+            except Exception as e_obs:
+                print(f"⚠️ No se cargaron observaciones para {remitente}: {e_obs}")
+
             return {
                 'total_correos': total,
                 'es_primer_contacto': False,
@@ -431,7 +475,9 @@ class AnalizadorCorreos:
                 'tono_habitual': tono_mas_comun,
                 'respuestas_anteriores': respuestas[-2:],  # Últimas 2
                 'tema_principal': tema_principal,
-                'historial_completo': historial.data  # Por si se necesita
+                'historial_completo': historial.data,  # Por si se necesita
+                'obs_contacto_txt':     obs_contacto_txt,   # NUEVO
+                'obs_usuario_txt':      obs_usuario_txt,    # NUEVO
             }
         
         except Exception as e:
@@ -441,7 +487,9 @@ class AnalizadorCorreos:
                 'es_primer_contacto': True,
                 'tono_habitual': 'desconocido',
                 'respuestas_anteriores': [],
-                'temas_frecuentes': []
+                'temas_frecuentes': [],
+                'obs_contacto_txt': "",
+                'obs_usuario_txt': "",
             }
 
     # ================================================================
@@ -597,6 +645,66 @@ class AnalizadorCorreos:
                     }
                 }
                 supabase_client.table('correos_analizados').insert(datos_bd).execute()
+                
+                # --- [INSERCIÓN QUIRÚRGICA: Cambio 2 (Observaciones)] ---
+                try:
+                    
+                    remitente_email = c_final.get('de', '')
+                    tono            = res_prof.get('tono_detectado', '')
+                    urgencia        = c_final.get('urgencia', '')
+                    categoria       = c_final.get('categoria', '')
+
+                    tareas_obs = []
+                    if tono:
+                        tareas_obs.append(('usuario', 'tono_respuesta',
+                            f"Roger responde con tono {tono} a {remitente_email}",
+                            [c_final.get('asunto','')[:80]], 0.70))
+                    if urgencia == 'alta':
+                        tareas_obs.append(('contacto', 'nivel_urgencia',
+                            f"{remitente_email} envía correos de alta urgencia frecuentemente",
+                            [c_final.get('asunto','')[:80]], 0.75))
+                    if categoria:
+                        tareas_obs.append(('contacto', 'tema_dominante',
+                            f"Correos de {remitente_email} son principalmente de categoría {categoria}",
+                            [c_final.get('asunto','')[:80]], 0.65))
+                    if res_prof.get('cambio_tono'):
+                        tareas_obs.append(('contacto', 'variacion_tono',
+                            f"{remitente_email} cambió su tono habitual",
+                            [c_final.get('asunto','')[:80]], 0.60))
+
+                    for sujeto, dim, obs, ev, peso in tareas_obs:
+                        await guardar_observacion(
+                            supabase_client, usuario_id, remitente_email,
+                            'email', sujeto, dim, obs, ev, peso
+                        )
+                except Exception as e_obs:
+                    print(f"⚠️ Error guardando observaciones correo: {e_obs}")
+                # --------------------------------------------------------
+
+                # --- [INSERCIÓN QUIRÚRGICA: Paso 3 ampliado (Alertas)] ---
+                if res_prof.get('acciones_pendientes'):
+                    try:
+                        supabase_client.table('alertas').insert({
+                            'usuario_id':  usuario_id,
+                            'titulo':      f"📧 {c_final.get('asunto', 'Correo sin asunto')[:60]}",
+                            'descripcion': f"De: {c_final.get('de', '')}",
+                            'tipo':        'tarea_ia',
+                            'prioridad':   'ALTA' if c_final.get('urgencia') == 'alta' else 'MEDIA',
+                            'estado':      'pendiente',
+                            'etiqueta':    'NEGOCIO',
+                            'fecha_limite': f_limite,
+                            'metadata': {
+                                'origen':            'email_cerebro',
+                                'numero_telefonico': c_final.get('de', ''),   # email como ancla
+                                'intencion_nativa':  c_final.get('categoria', 'solicitud_documento'),
+                                'hora_del_evento':   None,
+                                'correo_id':         c_final.get('id'),
+                            }
+                        }).execute()
+                    except Exception as e_alerta:
+                        print(f"⚠️ Error creando alerta desde correo: {e_alerta}")
+                # ---------------------------------------------------------
+
                 estadisticas['accion_alta'] += 1
                 correos_criticos.append({'correo': c_final, 'analisis': res_prof, 'clasificacion': c_final})
                 
