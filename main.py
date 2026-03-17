@@ -2559,10 +2559,26 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 
                 for m in lista_mensajes:
                     autor = "YO" if m['es_mio'] else nombre_display_actual
-                    transcripcion += f"[{m['timestamp']}] {autor}: {m['contenido']}\n"
+                    # 👇👇 INICIO DE LA INTEGRACIÓN MULTIMEDIA 👇👇
+                    texto_final_mensaje = m['contenido']
                     
-                    if m['contenido'] and len(m['contenido']) > 5:
-                        mensajes_a_vectorizar.append(m)
+                    # Extraer metadatos de forma segura
+                    meta = m.get('metadata') or {}
+                    
+                    # Si es una imagen y Tesseract logró leer algo, lo anexamos al contexto
+                    if m.get('tipo') == 'imagen' and meta.get('texto_ocr'):
+                        texto_final_mensaje += f" [TEXTO EXTRAÍDO DE LA IMAGEN: {meta.get('texto_ocr')}]"
+                        
+                    # Si es un documento, audio, etc., y tiene texto transcrito en metadata, puedes agregarlo igual
+                    # 👆👆 FIN DE LA INTEGRACIÓN MULTIMEDIA 👆👆
+                    transcripcion += f"[{m['timestamp']}] {autor}: {texto_final_mensaje}\n"
+                    
+                    # Actualizamos también la condición para vectorizar para que tome en cuenta el texto final
+                    if texto_final_mensaje and len(texto_final_mensaje) > 5:
+                        # Reemplazamos temporalmente el contenido para que ChromaDB guarde el texto del OCR también
+                        m_vector = m.copy()
+                        m_vector['contenido'] = texto_final_mensaje
+                        mensajes_a_vectorizar.append(m_vector)
 
                 # 2. Indexación ChromaDB con BATCHING (Rápido y ahorra cuota)
                 if mensajes_a_vectorizar:
@@ -3055,8 +3071,9 @@ async def procesar_transcripcion(
 async def procesar_imagen(
     background_tasks: BackgroundTasks,
     archivo: UploadFile = File(...),
-    mensaje_id: str = None,
-    chat_nombre: str = None
+    mensaje_id: str = Form(...),
+    chat_nombre: str = Form(...),
+    hash_original: str = Form(...) # <--- Recibe el hash exacto desde Android
 ):
     """
     Procesa una imagen de WhatsApp con OCR
@@ -3064,27 +3081,23 @@ async def procesar_imagen(
     try:
         print(f"🖼️ Recibiendo imagen: {archivo.filename}")
         
-        # Leer contenido
-        contenido = await archivo.read()
-        
-        # Generar hash para detectar duplicados
-        hash_imagen = hashlib.sha256(contenido).hexdigest()
         
         # Verificar si ya procesamos esta imagen
         existente = supabase.table('imagenes_procesadas')\
             .select('*')\
-            .eq('hash', hash_imagen)\
+            .eq('hash', hash_original)\
             .execute()
         
         if existente.data:
-            print(f"♻️ Imagen duplicada: {hash_imagen[:8]}")
+            print(f"♻️ Imagen duplicada: {hash_original[:8]}")
             return {
                 "status": "duplicado",
-                "hash": hash_imagen,
+                "hash": hash_original,
                 "resultado_id": existente.data[0]['id']
             }
         
         # Guardar temporalmente
+        contenido = await archivo.read()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
             temp_file.write(contenido)
             ruta_temp = temp_file.name
@@ -3093,14 +3106,14 @@ async def procesar_imagen(
         background_tasks.add_task(
             procesar_ocr_imagen,
             ruta_temp,
-            hash_imagen,
+            hash_original,
             mensaje_id,
             chat_nombre
         )
         
         return {
             "status": "procesando",
-            "hash": hash_imagen,
+            "hash": hash_original,
             "mensaje_id": mensaje_id
         }
         
@@ -3131,14 +3144,23 @@ async def procesar_ocr_imagen(
         
         if tiene_texto:
             print(f"✅ Texto extraído: '{texto_extraido[:50]}...'")
+            # --- INSERCIÓN QUIRÚRGICA INICIO ---
+            # 1. Recuperamos la metadata actual del mensaje para no borrar otros datos (ej: origen, gps, etc)
+            respuesta = supabase.table('mensajes_whatsapp').select('metadata').eq('id', mensaje_id).execute()
             
+            metadata_actual = {}
+            if respuesta.data and respuesta.data[0].get('metadata'):
+                metadata_actual = respuesta.data[0]['metadata']
+            
+            # 2. Inyectamos solo los datos nuevos del OCR
+            metadata_actual['texto_ocr'] = texto_extraido.strip()
+            metadata_actual['tiene_texto'] = True
+            metadata_actual['procesado_ocr_en'] = datetime.utcnow().isoformat()
+            # --- INSERCIÓN QUIRÚRGICA FIN ---
+
             # Actualizar mensaje en Supabase
             supabase.table('mensajes_whatsapp').update({
-                'metadata': {
-                    'texto_ocr': texto_extraido,
-                    'tiene_texto': True,
-                    'procesado_ocr_en': datetime.utcnow().isoformat()
-                },
+                'metadata': metadata_actual,
                 'procesado_ia': False
             }).eq('id', mensaje_id).execute()
             
