@@ -526,7 +526,8 @@ class AnalizadorCorreos:
         }
         
         correos_criticos = []
-
+        correos_ignorados_bd = []
+        
         # --- PASO 0: FILTRAR DUPLICADOS (AHORRO DE CUOTA) ---
         # Sacamos los IDs de Gmail de la lista que acabamos de bajar
         ids_gmail_entrantes = [c['id'] for c in correos]
@@ -565,12 +566,34 @@ class AnalizadorCorreos:
             if 'cuerpo_html' in correo and correo['cuerpo_html']:
                 correo['cuerpo_html'] = correo['cuerpo_html'][:3000]
 
-            if self.es_spam_obvio(correo) or self.calcular_score_inicial(correo, nombre_usuario) < 30:
+            # 🧠 CÁLCULO REAL DE DATOS
+            score_calculado = self.calcular_score_inicial(correo, nombre_usuario)
+            es_spam = self.es_spam_obvio(correo)
+
+            if es_spam or score_calculado < 30:
                 estadisticas['spam_descartado'] += 1
+                # 👇 GUARDAR EN BD: Conservando score y datos reales 👇
+                correos_ignorados_bd.append({
+                    'usuario_id': usuario_id, 
+                    'cuenta_gmail_id': cuenta_gmail_id,
+                    'remitente': correo.get('de', 'Desconocido'), 
+                    'asunto': correo.get('asunto', '(Sin asunto)'),
+                    'fecha': correo.get('fecha'),
+                    'score_importancia': score_calculado, # <-- DATO REAL 
+                    'categoria': 'spam' if es_spam else 'irrelevante',
+                    'urgencia': 'baja',
+                    'requiere_accion': False, 
+                    'leido': True, 
+                    'respondido': False,
+                    'cuerpo_html': correo.get('cuerpo_html', ''),
+                    'cuerpo_texto': correo.get('cuerpo', ''),
+                    'id_correo_gmail': correo.get('id'),
+                    'metadata': {'correo_id_gmail': correo.get('id'), 'motivo': 'Capa 1: Filtro Python'}
+                })
             else:
                 correos_para_ia.append(correo)
 
-        if not correos_para_ia:
+        if not correos_para_ia and not correos_ignorados_bd:
             return {**estadisticas, 'correos_criticos': []}
 
         # --- 3. BATCH IA RÁPIDA (De 10 en 10) ---
@@ -585,16 +608,70 @@ class AnalizadorCorreos:
                 correo_orig = lote_actual[idx]
                 correo_orig.update(res_ia)
                 
+                # 🧠 CÁLCULO REAL DE IA Y SCORE
+                score_calculado_ia = self.calcular_score_inicial(correo_orig, nombre_usuario)
+                
                 if res_ia.get('categoria') == 'spam' or not res_ia.get('requiere_accion'):
                     estadisticas['accion_baja'] += 1
+                    # 👇 GUARDAR EN BD: Conservando datos de la IA 👇
+                    correos_ignorados_bd.append({
+                        'usuario_id': usuario_id, 
+                        'cuenta_gmail_id': cuenta_gmail_id,
+                        'remitente': correo_orig.get('de', 'Desconocido'), 
+                        'asunto': correo_orig.get('asunto', '(Sin asunto)'),
+                        'fecha': correo_orig.get('fecha'),
+                        'score_importancia': score_calculado_ia, # <-- DATO REAL
+                        'categoria': res_ia.get('categoria', 'personal'), # <-- IA
+                        'urgencia': res_ia.get('urgencia', 'baja'),       # <-- IA
+                        'requiere_accion': False, 
+                        'leido': True, 
+                        'respondido': False,
+                        'cuerpo_html': correo_orig.get('cuerpo_html', ''),
+                        'cuerpo_texto': correo_orig.get('cuerpo', ''),
+                        'id_correo_gmail': correo_orig.get('id'), 
+                        'metadata': {
+                            'correo_id_gmail': correo_orig.get('id'), 
+                            'motivo': 'Capa 2: Baja prioridad',
+                            'resumen_corto': res_ia.get('resumen_corto', '')
+                        }
+                    })
                 elif res_ia.get('urgencia') == 'alta' or self.calcular_score_inicial(correo_orig, nombre_usuario) > 70:
                     correos_urgentes_pendientes.append(correo_orig)
                 else:
                     estadisticas['accion_media'] += 1
+                    correos_ignorados_bd.append({
+                        'usuario_id': usuario_id, 
+                        'cuenta_gmail_id': cuenta_gmail_id,
+                        'remitente': correo_orig.get('de', 'Desconocido'), 
+                        'asunto': correo_orig.get('asunto', '(Sin asunto)'),
+                        'fecha': correo_orig.get('fecha'),
+                        'score_importancia': score_calculado_ia, # <-- DATO REAL
+                        'categoria': res_ia.get('categoria', 'personal'), # <-- IA
+                        'urgencia': res_ia.get('urgencia', 'media'),      # <-- IA
+                        'requiere_accion': False, # False para no generar alertas, pero queda historial
+                        'leido': True, 
+                        'respondido': False,
+                        'cuerpo_html': correo_orig.get('cuerpo_html', ''),
+                        'cuerpo_texto': correo_orig.get('cuerpo', ''),
+                        'id_correo_gmail': correo_orig.get('id'), 
+                        'metadata': {
+                            'correo_id_gmail': correo_orig.get('id'), 
+                            'motivo': 'Capa 2: Acción Media',
+                            'resumen_corto': res_ia.get('resumen_corto', '')
+                        }
+                    })
             
             import asyncio
             await asyncio.sleep(4) # Válvula de seguridad
 
+        # --- [NUEVO PASO] INSERCIÓN MASIVA DE CORREOS DESCARTADOS ---
+        # Se insertan todos en un solo viaje a Supabase (muy eficiente)
+        if correos_ignorados_bd:
+            try:
+                supabase_client.table('correos_analizados').insert(correos_ignorados_bd).execute()
+            except Exception as e_ign:
+                print(f"⚠️ Error guardando correos ignorados: {e_ign}")
+                
         # --- 4. BATCH IA PROFUNDA (De 3 en 3) ---
         # 👉 AQUÍ DICE QUE CORTE DE 3 EN 3:
         for i in range(0, len(correos_urgentes_pendientes), 3):
