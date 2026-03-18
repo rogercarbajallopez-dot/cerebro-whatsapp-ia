@@ -402,38 +402,64 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
 
 async def guardar_observacion(supabase, usuario_id, numero_telefonico, canal,
                                sujeto, dimension, observacion, evidencia, peso=0.5):
+    """
+    Registra o actualiza una observación de comportamiento.
+    Si ya existe una observación idéntica (misma dimensión, sujeto y texto), 
+    incrementa las confirmaciones y promedia el peso. Si no, crea un registro nuevo.
+    """
+    # 1. Validación de salida temprana (Early Return)
     if not observacion or not observacion.strip():
         return
-    try:
-        supabase.table('patron_observaciones').upsert({
-            'usuario_id':        usuario_id,
-            'numero_telefonico': numero_telefonico,
-            'canal':             canal,
-            'sujeto':            sujeto,
-            'dimension':         dimension,
-            'observacion':       observacion.strip(),
-            'evidencia':         [e[:200] for e in (evidencia or [])[:5]],
-            'peso':              round(peso, 3),
-            'confirmaciones':    1,
-            'ultima_vez':        datetime.now(ZONA).isoformat(),
-        }, on_conflict='usuario_id, numero_telefonico, canal, sujeto, dimension, md5(observacion)').execute()
-    except Exception:
-        try:
-            ex = supabase.table('patron_observaciones')\
-                .select('id, confirmaciones, peso')\
-                .eq('usuario_id', usuario_id).eq('numero_telefonico', numero_telefonico)\
-                .eq('canal', canal).eq('sujeto', sujeto).eq('dimension', dimension)\
-                .eq('observacion', observacion.strip()).limit(1).execute()
-            if ex.data:
-                row = ex.data[0]
-                supabase.table('patron_observaciones').update({
-                    'confirmaciones': row['confirmaciones'] + 1,
-                    'peso': round((row['peso'] + peso) / 2, 3),
-                    'ultima_vez': datetime.now(ZONA).isoformat(),
-                }).eq('id', row['id']).execute()
-        except Exception as e2:
-            print(f"[patron_engine] Error guardando observacion: {e2}")
 
+    # 2. Limpieza y preparación de datos
+    obs_limpia = observacion.strip()
+    evidencia_limpia = [str(e)[:200] for e in (evidencia or [])[:5]]
+    
+    try:
+        # 3. CHECK (Consultar): Buscamos si la observación exacta ya existe en la BD
+        ex = supabase.table('patron_observaciones')\
+            .select('id, confirmaciones, peso')\
+            .eq('usuario_id', usuario_id)\
+            .eq('numero_telefonico', numero_telefonico)\
+            .eq('canal', canal)\
+            .eq('sujeto', sujeto)\
+            .eq('dimension', dimension)\
+            .eq('observacion', obs_limpia)\
+            .limit(1).execute()
+
+        # 4. ACT (Actuar): Lógica de bifurcación limpia
+        if ex.data:
+            # CASO A: La observación ya existe -> Actualizamos
+            row = ex.data[0]
+            nuevo_peso = round((row['peso'] + peso) / 2.0, 3)
+            nuevas_confirmaciones = row['confirmaciones'] + 1
+            
+            supabase.table('patron_observaciones').update({
+                'confirmaciones': nuevas_confirmaciones,
+                'peso': nuevo_peso,
+                'ultima_vez': datetime.now(ZONA).isoformat(),
+            }).eq('id', row['id']).execute()
+            
+        else:
+            # CASO B: La observación es nueva -> Insertamos
+            supabase.table('patron_observaciones').insert({
+                'usuario_id':        usuario_id,
+                'numero_telefonico': numero_telefonico,
+                'canal':             canal,
+                'sujeto':            sujeto,
+                'dimension':         dimension,
+                'observacion':       obs_limpia,
+                'evidencia':         evidencia_limpia,
+                'peso':              round(peso, 3),
+                'confirmaciones':    1,
+                'ultima_vez':        datetime.now(ZONA).isoformat(),
+            }).execute()
+
+    except Exception as e:
+        # 5. Manejo de Errores Críticos (ahora si atrapa un error, es un problema real de DB)
+        print(f"[patron_engine] ❌ Error crítico al guardar_observacion: {e}")
+
+        
 
 async def proponer_accion_predictiva(supabase, usuario_id: str, enviar_push_fn):
     ahora = datetime.now(ZONA)
