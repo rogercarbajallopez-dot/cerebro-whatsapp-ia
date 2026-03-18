@@ -49,7 +49,7 @@ class GmailService:
             # 1. Listar mensajes no leídos
             resultados = self.service.users().messages().list(
                 userId='me',
-                q='is:unread',
+                q='is:unread in:inbox -in:trash',
                 maxResults=cantidad
             ).execute()
             
