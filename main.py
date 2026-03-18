@@ -2639,9 +2639,10 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 - "intencion_nativa" (ej: "reunion_virtual", "solicitud_documento", "pago")
                 - "hora_del_evento" (HH:MM si se menciona, null si no). 
                 3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
-                4. "observaciones_usuario": Lista de observaciones sobre el usuario en esta conversación. 
+                4. "vinculo": "Familiar", "Laboral", "Amistad", "Comercial", "Academico" o "Desconocido". (Infiere la relación basándote en el trato y contexto).
+                5. "observaciones_usuario": Lista de observaciones sobre el usuario en esta conversación. 
                     - Cada una: {{"dimension": "vocabulario|tono|humor|nivel_formalidad|reaccion_al_conflicto|patron_horario|estilo_demanda|afecto|frases_caracteristicas|jerarquia", "sujeto": "usuario", "observacion": "texto", "evidencia": ["frases textuales"], "peso": 0.5}}
-                5. "observaciones_contacto": Lista de observaciones sobre {nombre_display_actual}. Misma estructura, sujeto: "contacto".
+                6. "observaciones_contacto": Lista de observaciones sobre {nombre_display_actual}. Misma estructura, sujeto: "contacto".
 
                 IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
                 """
@@ -2684,7 +2685,8 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     'usuario_id': usuario_id_real,
                     'resumen_actual': datos_ia.get('nuevo_resumen', contexto_previo),
                     'ultima_actualizacion': datetime.utcnow().isoformat(),
-                    'temas_abiertos': datos_ia.get('intencion', 'OTROS')
+                    'temas_abiertos': datos_ia.get('intencion', 'OTROS'),
+                    'vinculo_detectado': datos_ia.get('vinculo', 'Desconocido')
                 }
                 
                 # Upsert mágico de Supabase
