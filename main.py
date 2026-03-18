@@ -3352,13 +3352,25 @@ async def feedback_sugerencia(
         respuesta_sugerida = meta.get('respuesta_sugerida', '')
         tono_sugerido = meta.get('tono_sugerido', '')
 
+        
+        # 2. Obtener el nombre del usuario dinámicamente desde perfil_usuario
+        res_perfil = supabase.table('perfil_usuario')\
+            .select('dato')\
+            .eq('usuario_id', usuario_id)\
+            .eq('categoria', 'NOMBRE')\
+            .execute()
+        
+        # Si no tiene nombre registrado, usamos un genérico
+        nombre_usuario = res_perfil.data[0]['dato'] if res_perfil.data else "El usuario"
+
+
         if req.accion == 'aprobada':
             # El tono/estilo era correcto — reforzar
             if tono_sugerido:
                 await guardar_observacion(
                     supabase, usuario_id, req.numero_telefonico, req.canal,
                     'usuario', 'tono_aprobado',
-                    f"Roger aprobó respuesta con tono {tono_sugerido} para este contacto",
+                    f"{nombre_usuario} aprobó respuesta con tono {tono_sugerido} para este contacto",
                     [respuesta_sugerida[:100]],
                     peso=0.90
                 )
@@ -3376,7 +3388,7 @@ async def feedback_sugerencia(
                 await guardar_observacion(
                     supabase, usuario_id, req.numero_telefonico, req.canal,
                     'usuario', 'estilo_comunicacion',
-                    f"Roger prefiere ajustar ligeramente las sugerencias antes de enviar",
+                    f"{nombre_usuario} prefiere ajustar ligeramente las sugerencias antes de enviar",
                     [req.respuesta_final[:100]],
                     peso=0.70
                 )
@@ -3385,7 +3397,7 @@ async def feedback_sugerencia(
                 await guardar_observacion(
                     supabase, usuario_id, req.numero_telefonico, req.canal,
                     'usuario', 'estilo_preferido_real',
-                    f"Roger prefiere este estilo con este contacto: {req.respuesta_final[:80]}",
+                    f"{nombre_usuario} prefiere este estilo con este contacto: {req.respuesta_final[:80]}",
                     [req.respuesta_final[:150]],
                     peso=0.85
                 )
@@ -3404,7 +3416,7 @@ async def feedback_sugerencia(
             await guardar_observacion(
                 supabase, usuario_id, req.numero_telefonico, req.canal,
                 'contacto', 'sugerencia_rechazada',
-                f"Roger descartó la sugerencia completa para este contacto — perfil de contacto impreciso",
+                f"{nombre_usuario} descartó la sugerencia completa para este contacto — perfil de contacto impreciso",
                 [respuesta_sugerida[:100]],
                 peso=0.30  # señal débil pero registrada
             )
@@ -3414,10 +3426,10 @@ async def feedback_sugerencia(
             'metadata': meta | {
                 'feedback_accion': req.accion,
                 'respuesta_final_enviada': req.respuesta_final,
-                'feedback_registrado_en': datetime.utcnow().isoformat(),
+                'feedback_registrado_en': datetime.now(ZONA).isoformat(),
             },
             'estado': 'completada' if req.accion in ['aprobada', 'editada'] else 'descartada',
-            'updated_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.now(ZONA).isoformat(),
         }).eq('id', req.alerta_id).execute()
 
         return {
