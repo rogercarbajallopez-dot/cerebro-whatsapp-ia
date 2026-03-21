@@ -12,7 +12,7 @@ from google.genai import types
 import json
 import gc  # 🧹 IMPORTACIÓN DEL RECOLECTOR DE BASURA
 from patron_engine import guardar_observacion
-from main import enviar_push
+
 class AnalizadorCorreos:
     """
     Motor de análisis de correos con optimización de costos.
@@ -548,7 +548,9 @@ class AnalizadorCorreos:
                 'requieren_accion': int,
                 'correos_criticos': [...]
             }
+        
         """
+        from main import enviar_push
         estadisticas = {
             'procesados': 0,
             'spam_descartado': 0,
