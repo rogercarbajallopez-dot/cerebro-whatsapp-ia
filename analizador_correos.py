@@ -12,7 +12,7 @@ from google.genai import types
 import json
 import gc  # 🧹 IMPORTACIÓN DEL RECOLECTOR DE BASURA
 from patron_engine import guardar_observacion
-
+from main import enviar_push
 class AnalizadorCorreos:
     """
     Motor de análisis de correos con optimización de costos.
@@ -237,8 +237,11 @@ class AnalizadorCorreos:
     # MODIFICAR LA FUNCIÓN `analizar_profundo` (REEMPLAZAR LA EXISTENTE)
     # ================================================================
     
-    async def analizar_profundo(self, lote_datos: List[Dict], gemini_client) -> List[Dict]:
-    
+    async def analizar_profundo(self, lote_datos: List[Dict], gemini_client, supabase_client, usuario_id) -> List[Dict]:
+        
+        
+        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         """
         Análisis completo con contexto histórico MEJORADO en lotes pequeños.
         
@@ -247,6 +250,18 @@ class AnalizadorCorreos:
         """
 
         if not lote_datos: return []
+
+        # --- OBTENER INVENTARIO DE TAREAS PENDIENTES ---
+        try:
+            res_pend = supabase_client.table('alertas').select('id, titulo, tipo, fecha_limite').eq('usuario_id', usuario_id).eq('estado', 'pendiente').execute()
+            pendientes = res_pend.data if res_pend.data else []
+            lista_pendientes_txt = "\n".join([f"- ID_REF: {t['id']} | Título: {t['titulo']} | Tipo: {t['tipo']}" for t in pendientes])
+            if not lista_pendientes_txt:
+                lista_pendientes_txt = "(No hay tareas pendientes)"
+        except Exception as e:
+            print(f"Error consultando pendientes: {e}")
+            lista_pendientes_txt = "(Error al consultar inventario)"
+        # -----------------------------------------------
 
         textos_prompt = ""
         # 🔥 TU LÓGICA ORIGINAL EXACTA SE EJECUTA PARA CADA CORREO DEL LOTE
@@ -306,7 +321,9 @@ class AnalizadorCorreos:
         # Prompt mejorado con contexto
         prompt = f"""
         Actúa como asistente personal experto analizando un correo CRÍTICO.
-
+        HOY ES: {fecha_actual}
+        INVENTARIO DE TAREAS PENDIENTES: 
+        {lista_pendientes_txt}
         {contexto_hist}
 
         {textos_prompt}
@@ -319,11 +336,15 @@ class AnalizadorCorreos:
             - Mantener CONSISTENCIA con respuestas previas
             - Que sea conciso pero completo (máximo 200 palabras)
 
-            2. ACCIONES PENDIENTES: Lista específica de lo que el usuario debe hacer.
+            2. ACCIONES PENDIENTES: Desglosa el correo en una LISTA de acciones técnicas. Identifica si exige CREAR (nuevo), MODIFICAR (existente en inventario) o COMPLETAR/CANCELAR (existente en inventario). 
 
             3. FECHA LÍMITE: Si hay deadline, extrae la fecha en formato ISO (YYYY-MM-DD).
 
             4. TONO DETECTADO: Formal, informal, urgente, amigable, etc.
+        REGLAS PARA ACCIONES PENDIENTES:
+        - MODIFICAR/COMPLETAR: Usa el ID_REF exacto del inventario.
+        - CREAR: Usa null en id_tarea_bd.
+        - TIPO ACCION: "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion", "ninguna".
 
         Responde SOLO con este ARRAY JSON de {len(lote_datos)} objetos:
         [
@@ -331,12 +352,23 @@ class AnalizadorCorreos:
                 "id_correo": 0,
                 "respuesta_sugerida": "Estimado/a...",
                 "tono_detectado": "formal" | "informal" | "urgente",
-                "acciones_pendientes": ["Acción 1", "Acción 2"],
-                "fecha_limite": "2026-01-20" | null,
                 "prioridad_final": 80-100,
                 "contexto_adicional": "Notas relevantes del historial",
-                "cambio_tono": false  // true si el tono cambió respecto al habitual
-            }}
+                "cambio_tono": false  // true si el tono cambió respecto al habitual,
+                "acciones_pendientes": [
+                        {{
+                            "accion_macro": "crear" | "modificar" | "completar",
+                            "id_tarea_bd": "UUID_EXACTO" | null,
+                            "datos": {{
+                                "titulo": "Acción específica",
+                                "tipo_accion": "poner_alarma" | "agendar_calendario",
+                                "prioridad": "ALTA" | "MEDIA",
+                                "fecha_iso": "2026-03-21T09:00:00",
+                                "dato_extra": "Email, link o teléfono"
+                            }}
+                        }}
+                    ]
+                }}
         ]
         """
         
@@ -671,7 +703,17 @@ class AnalizadorCorreos:
                 supabase_client.table('correos_analizados').insert(correos_ignorados_bd).execute()
             except Exception as e_ign:
                 print(f"⚠️ Error guardando correos ignorados: {e_ign}")
-                
+
+        # 👇 INYECCIÓN 1: OBTENER TOKEN FCM (Una sola consulta para todo el lote) 👇
+        token_usuario = None
+        try:
+            user_data = supabase_client.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            if user_data.data: 
+                token_usuario = user_data.data[0].get('fcm_token')
+        except Exception as e_tok:
+            print(f"⚠️ No se pudo obtener token FCM: {e_tok}")
+        # 👆 FIN INYECCIÓN 1 👆
+        #  
         # --- 4. BATCH IA PROFUNDA (De 3 en 3) ---
         # 👉 AQUÍ DICE QUE CORTE DE 3 EN 3:
         for i in range(0, len(correos_urgentes_pendientes), 3):
@@ -692,8 +734,8 @@ class AnalizadorCorreos:
                 })
             
             # Pasamos la lista estructurada a TU función
-            resultados_profundos = await self.analizar_profundo(datos_para_profundo, gemini_client)
-            
+            # Pasamos la lista estructurada a TU función (AHORA CON SUPABASE)
+            resultados_profundos = await self.analizar_profundo(datos_para_profundo, gemini_client, supabase_client, usuario_id)            
             # Guardado en BD (Tu lógica original intacta)
             for item in datos_para_profundo:
                 idx = item['id_correo']
@@ -757,31 +799,93 @@ class AnalizadorCorreos:
                 except Exception as e_obs:
                     print(f"⚠️ Error guardando observaciones correo: {e_obs}")
                 # --------------------------------------------------------
+                
 
-                # --- [INSERCIÓN QUIRÚRGICA: Paso 3 ampliado (Alertas)] ---
-                if res_prof.get('acciones_pendientes'):
+                # --- [INSERCIÓN QUIRÚRGICA: MOTOR DE ACCIÓN Y PUSH] ---
+                acciones = res_prof.get('acciones_pendientes', [])
+                acciones_para_crear = []
+
+                for accion in acciones:
+                    macro = accion.get('accion_macro', 'crear')
+                    datos = accion.get('datos', {})
+                    id_bd = accion.get('id_tarea_bd')
+
+                    # Saneamiento de fecha
+                    fecha_iso = datos.get('fecha_iso')
+                    if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
+
                     try:
-                        supabase_client.table('alertas').insert({
-                            'usuario_id':  usuario_id,
-                            'titulo':      f"📧 {c_final.get('asunto', 'Correo sin asunto')[:60]}",
-                            'descripcion': f"De: {c_final.get('de', '')}",
-                            'tipo':        'tarea_ia',
-                            'prioridad':   'ALTA' if c_final.get('urgencia') == 'alta' else 'MEDIA',
-                            'estado':      'pendiente',
-                            'etiqueta':    'NEGOCIO',
-                            'fecha_limite': f_limite,
-                            'metadata': {
-                                'origen':            'email_cerebro',
-                                'numero_telefonico': c_final.get('de', ''),   # email como ancla
-                                'intencion_nativa':  c_final.get('categoria', 'solicitud_documento'),
-                                'hora_del_evento':   None,
-                                'correo_id':         c_final.get('id'),
-                            }
-                        }).execute()
+                        # --- MODIFICAR O COMPLETAR (PUSH SILENCIOSO, NO MOLESTA AL USUARIO) ---
+                        if macro == 'completar' and id_bd:
+                            supabase_client.table('alertas').update({'estado': 'completado'}).eq('id', id_bd).execute()
+                            if token_usuario:
+                                enviar_push(token=token_usuario, titulo="Oculto", cuerpo="Oculto", data_extra={"tipo": "SYNC_COMMAND", "comando": "ELIMINAR_NATIVO", "alerta_id_bd": str(id_bd)})
+                        
+                        elif macro == 'modificar' and id_bd:
+                            payload = {'updated_at': datetime.now().isoformat()}
+                            if fecha_iso: payload['fecha_limite'] = fecha_iso
+                            if datos.get('titulo'): payload['titulo'] = datos['titulo']
+                            supabase_client.table('alertas').update(payload).eq('id', id_bd).execute()
+                            if token_usuario and fecha_iso:
+                                enviar_push(token=token_usuario, titulo="Oculto", cuerpo="Oculto", data_extra={"tipo": "SYNC_COMMAND", "comando": "REPROGRAMAR_NATIVO", "alerta_id_bd": str(id_bd), "nueva_fecha": fecha_iso, "tipo_accion_nativa": datos.get('tipo_accion')})
+                        
+                        # --- CREAR (AGRUPAMOS EN LA LISTA PARA MANDAR 1 SOLO PUSH LUEGO) ---
+                        elif macro == 'crear':
+                            acciones_para_crear.append({
+                                "tipo": datos.get('tipo_accion', 'agendar_calendario'),
+                                "titulo": datos.get('titulo', f"📧 {c_final.get('asunto', '')[:40]}"),
+                                "fecha_hora_especifica": fecha_iso,
+                                "dato_extra": datos.get('dato_extra', '')
+                            })
                     except Exception as e_alerta:
-                        print(f"⚠️ Error creando alerta desde correo: {e_alerta}")
-                # ---------------------------------------------------------
+                        print(f"⚠️ Error accion {macro}: {e_alerta}")
 
+                # --- EJECUTAR CREACIÓN Y ENVIAR 1 SOLO PUSH POR EL CORREO ---
+                if acciones_para_crear:
+                    metadata_segura = {
+                        "origen": "email_cerebro",
+                        "correo_id": c_final.get('id'),
+                        "acciones_programadas": acciones_para_crear
+                    }
+                    if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
+                        metadata_segura['link_meet'] = "https://meet.google.com/new"
+
+                    datos_finales = {
+                        "usuario_id": usuario_id,
+                        "titulo": f"📧 {c_final.get('asunto', 'Correo Procesado')[:40]}",
+                        "descripcion": f"De: {c_final.get('de', '')}",
+                        "prioridad": 'ALTA' if c_final.get('urgencia') == 'alta' else 'MEDIA',
+                        "tipo": "tarea_ia",
+                        "estado": "pendiente",
+                        "etiqueta": "NEGOCIO",
+                        "fecha_limite": acciones_para_crear[0].get('fecha_hora_especifica', f_limite),
+                        "metadata": metadata_segura 
+                    }
+
+                    res_crear = supabase_client.table('alertas').insert(datos_finales).execute()
+
+                    if token_usuario:
+                        cantidad = len(acciones_para_crear)
+                        titulo_push = f"🔴 Nueva Tarea: {acciones_para_crear[0]['titulo']}" if cantidad == 1 else f"📋 {cantidad} Acciones Requeridas"
+                        cuerpo_push = f"Derivado del correo: {c_final.get('asunto', '')[:30]}"
+
+                        try:
+                            enviar_push(
+                                token=token_usuario,
+                                titulo=titulo_push,
+                                cuerpo=cuerpo_push,
+                                data_extra={
+                                    "tipo": "TAREA_EJECUTABLE",
+                                    "alerta_id": str(res_crear.data[0]['id']) if res_crear.data else "0",
+                                    "ejecutar_automatico": "true",
+                                    "titulo": datos_finales['titulo'],
+                                    "acciones_json": json.dumps(acciones_para_crear),
+                                    "metadata": json.dumps(metadata_segura)
+                                }
+                            )
+                        except Exception as e_p: print(f"Error Push: {e_p}")
+                # ---------------------------------------------------------
+                
                 estadisticas['accion_alta'] += 1
                 correos_criticos.append({'correo': c_final, 'analisis': res_prof, 'clasificacion': c_final})
                 
