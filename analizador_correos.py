@@ -345,12 +345,18 @@ class AnalizadorCorreos:
         - MODIFICAR/COMPLETAR: Usa el ID_REF exacto del inventario.
         - CREAR: Usa null en id_tarea_bd.
         - TIPO ACCION: "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion", "ninguna".
+        - LÓGICA DE REUNIONES (CRÍTICO): 
+          * Si el usuario DEBE CREAR/AGENDAR la reunión (ej. "agendemos", "crea una reunión"): Genera la acción "agendar_calendario" Y TAMBIÉN "crear_meet".
+          * Si el usuario ES INVITADO o solo debe asistir (ej. "puedes sumarte", "te invito a la reunión"): Genera SOLO "agendar_calendario" (NO crees Meet).
+        - TÍTULOS DE ALARMAS INTELIGENTES: Si la acción es "poner_alarma" para contactar a alguien, el título DEBE incluir el nombre y el dato (Ej. "Llamar a Carlos al 933015193"). No lo dejes solo en "dato_extra".
+        - SÍNTESIS ALERTA: Redacta un resumen ultracorto (máximo 2 líneas) con el objetivo principal y los pendientes exactos (fechas, nombres, números). Esto irá directo a la UI del usuario.
 
         Responde SOLO con este ARRAY JSON de {len(lote_datos)} objetos:
         [
             {{
                 "id_correo": 0,
                 "respuesta_sugerida": "Estimado/a...",
+                "sintesis_alerta": "Agendar reunión para revisar lanzamiento y llamar a Carlos (933015193).",
                 "tono_detectado": "formal" | "informal" | "urgente",
                 "prioridad_final": 80-100,
                 "contexto_adicional": "Notas relevantes del historial",
@@ -361,7 +367,7 @@ class AnalizadorCorreos:
                             "id_tarea_bd": "UUID_EXACTO" | null,
                             "datos": {{
                                 "titulo": "Acción específica",
-                                "tipo_accion": "poner_alarma" | "agendar_calendario",
+                                "tipo_accion": "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion",
                                 "prioridad": "ALTA" | "MEDIA",
                                 "fecha_iso": "2026-03-21T09:00:00",
                                 "dato_extra": "Email, link o teléfono"
@@ -844,18 +850,29 @@ class AnalizadorCorreos:
 
                 # --- EJECUTAR CREACIÓN Y ENVIAR 1 SOLO PUSH POR EL CORREO ---
                 if acciones_para_crear:
+
+                    lista_tipos_accion = [a.get('tipo') for a in acciones_para_crear]
                     metadata_segura = {
                         "origen": "email_cerebro",
                         "correo_id": c_final.get('id'),
-                        "acciones_programadas": acciones_para_crear
+                        "acciones_programadas": acciones_para_crear,
+                        "acciones_sugeridas": lista_tipos_accion
                     }
                     if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
                         metadata_segura['link_meet'] = "https://meet.google.com/new"
 
+                    # Rescatamos la síntesis amigable que hizo la IA
+                    sintesis_amigable = res_prof.get('sintesis_alerta', "Revisar detalles en el correo original.")
+                    
+                    # 💡 SOLUCIÓN: Concatenamos el remitente original con la nueva síntesis
+                    remitente = c_final.get('de', 'Desconocido')
+                    descripcion_completa = f"De: {remitente}\n\nResumen: {sintesis_amigable}"
+
+
                     datos_finales = {
                         "usuario_id": usuario_id,
-                        "titulo": f"📧 {c_final.get('asunto', 'Correo Procesado')[:40]}",
-                        "descripcion": f"De: {c_final.get('de', '')}",
+                        "titulo": f"📧 {c_final.get('asunto', 'Correo Procesado')[:60]}",
+                        "descripcion": descripcion_completa,
                         "prioridad": 'ALTA' if c_final.get('urgencia') == 'alta' else 'MEDIA',
                         "tipo": "tarea_ia",
                         "estado": "pendiente",
