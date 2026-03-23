@@ -2630,21 +2630,56 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 NUEVA CONVERSACIÓN (Mensajes recientes):
                 {transcripcion}
                 TU OBJETIVO:
-                Generar un JSON válido con 3 campos obligatorios:
+                Generar un JSON válido con 7 campos obligatorios:
                 1. "nuevo_resumen": Un párrafo que combine el contexto anterior con lo nuevo. Si el tema cambió drásticamente, descarta lo viejo irrelevante. Mantén fechas y acuerdos.
-                2. "tareas": Una lista de objetos. Si no hay tareas, lista vacía []. Cada objeto debe tener:
-                - "titulo": Breve (ej: "Comprar leche")
-                - "descripcion": Detalles (ej: "Marca X, para mañana")
-                - "prioridad": "ALTA", "MEDIA" o "BAJA"
-                - "intencion_nativa" (ej: "reunion_virtual", "solicitud_documento", "pago")
-                - "hora_del_evento" (HH:MM si se menciona, null si no). 
-                3. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
-                4. "vinculo": "Familiar", "Laboral", "Amistad", "Comercial", "Academico" o "Desconocido". (Infiere la relación basándote en el trato y contexto).
-                5. "observaciones_usuario": Lista de observaciones sobre el usuario en esta conversación. 
+                2. "intencion": "TRABAJO", "PERSONAL", "VENTAS" o "OTROS".
+                3. "vinculo": "Familiar", "Laboral", "Amistad", "Comercial", "Academico" o "Desconocido". (Infiere la relación basándote en el trato y contexto).
+                4. "sintesis_alerta": Resumen ultracorto (máx 2 líneas) con el objetivo principal y los pendientes exactos a realizar (con fechas y datos).
+                5. "acciones_pendientes": Desglosa los pendientes en una LISTA de acciones técnicas. Si no hay, lista vacía [].
+                    - "titulo": Breve (ej: "Comprar leche")
+                    - "tipo_accion": "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion", "ninguna",
+                    - "descripcion": Detalles (ej: "Marca X, para mañana")
+                    - "prioridad": "ALTA", "MEDIA" o "BAJA"
+                    - "fecha_iso": "2026-03-25T15:00:00",
+                    - "dato_extra": teléfono, link o dato vital,
+                6. "observaciones_usuario": Lista de observaciones sobre el usuario en esta conversación. 
                     - Cada una: {{"dimension": "vocabulario|tono|humor|nivel_formalidad|reaccion_al_conflicto|patron_horario|estilo_demanda|afecto|frases_caracteristicas|jerarquia", "sujeto": "usuario", "observacion": "texto", "evidencia": ["frases textuales"], "peso": 0.5}}
-                6. "observaciones_contacto": Lista de observaciones sobre {nombre_display_actual}. Misma estructura, sujeto: "contacto".
+                7. "observaciones_contacto": Lista de observaciones sobre {nombre_display_actual}. Misma estructura, sujeto: "contacto".
+                
+            REGLAS PARA ACCIONES PENDIENTES:
+        - MODIFICAR/COMPLETAR: Usa el ID_REF exacto del inventario.
+        - CREAR: Usa null en id_tarea_bd.
+        - TIPO ACCION: "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion", "ninguna".
+        - LÓGICA DE REUNIONES (CRÍTICO): 
+          * Si el usuario DEBE CREAR/AGENDAR la reunión (ej. "agendemos", "crea una reunión"): Genera la acción "agendar_calendario" Y TAMBIÉN "crear_meet".
+          * Si el usuario ES INVITADO o solo debe asistir (ej. "puedes sumarte", "te invito a la reunión"): Genera SOLO "agendar_calendario" (NO crees Meet).
+        - TÍTULOS DE ALARMAS INTELIGENTES: Si la acción es "poner_alarma" para contactar a alguien, el título DEBE incluir el nombre y el dato (Ej. "Llamar a Carlos al 933015193"). No lo dejes solo en "dato_extra".
+        - SÍNTESIS ALERTA: Redacta un resumen ultracorto (máximo 2 líneas) con el objetivo principal y los pendientes exactos (fechas, nombres, números). Esto irá directo a la UI del usuario.
 
-                IMPORTANTE: Responde SOLO con el JSON. No uses Markdown.
+                             
+                IMPORTANTE: Responde SOLO con el JSON usando exactamente esta estructura:
+                {{
+                    "nuevo_resumen": "...",
+                    "intencion": "TRABAJO", "PERSONAL", "VENTAS", "SALUD" o "OTROS",
+                    "vinculo": "Familiar", "Laboral", "Amistad", "Comercial", "Academico" o "Desconocido". (Infiere la relación basándote en el trato y contexto),
+                    "sintesis_alerta": "Llamar a Carlos al 99999999 y agendar reunión mañna 10 am.",
+                    "acciones_pendientes": [
+                        {{
+                            "accion_macro": "crear",
+                            "id_tarea_bd": null,
+                            "datos": {{
+                                "titulo": "Título de la acción",
+                                "tipo_accion": "poner_alarma", "agendar_calendario", "crear_meet", "abrir_yape", "enviar_correo", "llamar", "ver_ubicacion", "ninguna",
+                                "prioridad": "ALTA",
+                                "fecha_iso": "2026-03-25T15:00:00",
+                                "dato_extra": "{numero_tel}"
+                            }}
+                        }}
+                    ]
+                    "observaciones_usuario": [],
+                    "observaciones_contacto": []
+                }}
+                
                 """
 
                 global gemini_client
@@ -2653,8 +2688,10 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                 datos_ia = {
                     "nuevo_resumen": contexto_previo, 
-                    "tareas": [], 
-                    "intencion": "OTROS"
+                    "acciones_pendientes": [],
+                    "intencion": "OTROS",
+                    "vinculo": "Desconocido",
+                    "sintesis_alerta": "Sin pendientes."
                 }
 
                 try:
@@ -2734,29 +2771,64 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 # ------------------------------------------------------
 
                 # Guardar Tareas Detectadas
-                tareas_detectadas = datos_ia.get('tareas', [])
-                for tarea in tareas_detectadas:
-                    supabase.table('alertas').insert({
-                        'usuario_id': usuario_id_real,
-                        'titulo': f"⚡ {tarea.get('titulo', 'Nueva tarea')}",
-                        'descripcion': f"Origen: {nombre_display_actual}. {tarea.get('descripcion', '')}",
-                        'tipo': 'tarea_ia',
-                        'prioridad': tarea.get('prioridad', 'MEDIA').upper(),
-                        'metadata': {
-                            'origen': 'whatsapp_cerebro', 
-                            'chat': nombre_display_actual, 
-                            'telefono': numero_tel,
-                            'numero_telefonico': numero_tel,
-                            'intencion_nativa': tarea.get('intencion_nativa', ''),
-                            'hora_del_evento': tarea.get('hora_del_evento')
-                        }
-                    }).execute()
+                # ---------------------------------------------------------
+                # --- [INSERCIÓN QUIRÚRGICA: MOTOR DE ACCIÓN (100% SILENCIOSO)] ---
+                # ---------------------------------------------------------
+                acciones = datos_ia.get('acciones_pendientes', [])
+                acciones_para_crear = []
+
+                for accion in acciones:
+                    datos_accion = accion.get('datos', {})
+                    fecha_iso = accion.get('fecha_iso')
+                    if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
+
+                    # Armamos la estructura de acciones que Flutter sabe leer
+                    acciones_para_crear.append({
+                        "tipo": accion.get('tipo_accion', 'poner_alarma'),
+                        "titulo": accion.get('titulo', f"⚡ Tarea con {nombre_display_actual}"),
+                        "fecha_hora_especifica": fecha_iso,
+                        "dato_extra": accion.get('dato_extra', numero_tel)
+                    })
+
+                if acciones_para_crear:
+                    # Extraemos los tipos ('agendar_calendario', 'crear_meet') para que Flutter pinte los botones
+                    lista_tipos_accion = [a.get('tipo') for a in acciones_para_crear]
+                    metadata_segura = {
+                        "origen": "whatsapp_cerebro",
+                        "chat": nombre_display_actual,
+                        "telefono": numero_tel,
+                        "acciones_programadas": acciones_para_crear,
+                        "acciones_sugeridas": lista_tipos_accion
+                    }
+                    if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
+                        metadata_segura['link_meet'] = "https://meet.google.com/new"
+
+                    sintesis_amigable = datos_ia.get('sintesis_alerta', "Pendientes detectados en el chat.")
+                    descripcion_completa = f"De: {nombre_display_actual}\n\nResumen: {sintesis_amigable}"
+
+                    datos_finales = {
+                        "usuario_id": usuario_id_real,
+                        "titulo": f"💬 {acciones_para_crear[0].get('titulo', 'Nuevo Pendiente')[:60]}",
+                        "descripcion": descripcion_completa,
+                        "prioridad": acciones_para_crear[0].get('prioridad', 'MEDIA').upper(),
+                        "tipo": "tarea_ia",
+                        "estado": "pendiente",
+                        "etiqueta": datos_ia.get('intencion', 'OTROS').upper(),
+                        "fecha_limite": acciones_para_crear[0].get('fecha_hora_especifica'),
+                        "metadata": metadata_segura 
+                    }
+
+                    # 🔥 Se inserta en la BD de forma 100% silenciosa.
+                    # Cuando el usuario abra la app, la tabla "alertas" ya tendrá la metadata
+                    # lista y la UI de Flutter renderizará los botones de ejecución al instante.
+                    supabase.table('alertas').insert(datos_finales).execute()
+                # ---------------------------------------------------------
 
                 # Marcar mensajes como procesados
                 if ids_a_procesar:
                     supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
 
-                resultados_log.append({"chat": nombre_display_actual, "tareas_creadas": len(tareas_detectadas)})
+                resultados_log.append({"chat": nombre_display_actual, "tareas_creadas": len(acciones_para_crear)})
 
             except Exception as e_chat:
                 print(f"❌ Error general en chat {nombre_display_actual}: {e_chat}")
