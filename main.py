@@ -2617,12 +2617,17 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                                 print(f" ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
                         except Exception as e_chroma:
                             print(f" ⚠️ Error indexando en ChromaDB: {e_chroma}")
-                        
+                
+                fecha_hora_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")             
 
                 # Prompt Gemini
                 prompt = f"""
 
                 Actúa como un Analista de Comportamiento Personales experto.
+                
+                ⏱️ FECHA Y HORA ACTUAL DEL SISTEMA: {fecha_hora_actual}
+                CRÍTICO: Usa esta fecha actual como tu única referencia matemática para calcular cualquier fecha relativa mencionada en la conversación (ej: "mañana", "hoy", "el viernes", "la próxima semana"). Todos los campos "fecha_iso" deben derivar de aquí.
+
                 PERFIL DEL USUARIO (QUIÉN ES ROGER):
                 "{perfil_yo}"
                 CONTEXTO ANTERIOR (Resumen de lo hablado antes):
@@ -2779,15 +2784,16 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                 for accion in acciones:
                     datos_accion = accion.get('datos', {})
-                    fecha_iso = accion.get('fecha_iso')
+                    fecha_iso = datos_accion.get('fecha_iso')
                     if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
 
                     # Armamos la estructura de acciones que Flutter sabe leer
                     acciones_para_crear.append({
-                        "tipo": accion.get('tipo_accion', 'poner_alarma'),
-                        "titulo": accion.get('titulo', f"⚡ Tarea con {nombre_display_actual}"),
+                        "tipo": datos_accion.get('tipo_accion', 'poner_alarma'),
+                        "titulo": datos_accion.get('titulo', f"⚡ Tarea con {nombre_display_actual}"),
+                        "prioridad": datos_accion.get('prioridad', 'MEDIA'), # <-- AÑADIDO VITAL
                         "fecha_hora_especifica": fecha_iso,
-                        "dato_extra": accion.get('dato_extra', numero_tel)
+                        "dato_extra": datos_accion.get('dato_extra', numero_tel) # <-- CORREGIDO
                     })
 
                 if acciones_para_crear:
