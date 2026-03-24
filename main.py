@@ -3225,28 +3225,38 @@ async def procesar_ocr_imagen(
         if tiene_texto:
             print(f"✅ Texto extraído: '{texto_extraido[:50]}...'")
             # --- INSERCIÓN QUIRÚRGICA INICIO ---
-            # 1. Recuperamos la metadata actual del mensaje para no borrar otros datos (ej: origen, gps, etc)
-            respuesta = supabase.table('mensajes_whatsapp').select('metadata').eq('id', mensaje_id).execute()
-            
+            # Agregamos un bucle corto de reintento por si el texto viene un par de segundos retrasado
+            max_intentos = 3
             metadata_actual = {}
-            if respuesta.data and respuesta.data[0].get('metadata'):
-                metadata_actual = respuesta.data[0]['metadata']
+            mensaje_existe = False
             
-            # 2. Inyectamos solo los datos nuevos del OCR
-            metadata_actual['texto_ocr'] = texto_extraido.strip()
-            metadata_actual['tiene_texto'] = True
-            metadata_actual['procesado_ocr_en'] = datetime.utcnow().isoformat()
-            # --- INSERCIÓN QUIRÚRGICA FIN ---
+            for intento in range(max_intentos):
+                respuesta = supabase.table('mensajes_whatsapp').select('metadata').eq('id', mensaje_id).execute()
+                
+                if respuesta.data:
+                    mensaje_existe = True
+                    if respuesta.data[0].get('metadata'):
+                        metadata_actual = respuesta.data[0]['metadata']
+                    break
+                else:
+                    print(f"⏳ Mensaje padre {mensaje_id} aún no indexado en Supabase. Reintentando {intento+1}/{max_intentos}...")
+                    import time
+                    time.sleep(2) # Esperar 2 segundos y volver a intentar
+            
+            # Solo inyectamos si el mensaje ya existe
+            if mensaje_existe:
+                metadata_actual['texto_ocr'] = texto_extraido.strip()
+                metadata_actual['tiene_texto'] = True
+                metadata_actual['procesado_ocr_en'] = datetime.utcnow().isoformat()
 
-            # Actualizar mensaje en Supabase
-            supabase.table('mensajes_whatsapp').update({
-                'metadata': metadata_actual,
-                'procesado_ia': False
-            }).eq('id', mensaje_id).execute()
-            
-            
-        else:
-            print(f"ℹ️ Imagen sin texto significativo")
+                # Actualizar mensaje en Supabase
+                supabase.table('mensajes_whatsapp').update({
+                    'metadata': metadata_actual,
+                    'procesado_ia': False
+                }).eq('id', mensaje_id).execute()
+            else:
+                print(f"⚠️ Alerta: El mensaje {mensaje_id} no se encontró tras varios reintentos. OCR guardado solo en tabla imagenes_procesadas.")
+            # --- INSERCIÓN QUIRÚRGICA FIN ---
         
         # Guardar registro de imagen procesada
         supabase.table('imagenes_procesadas').insert({
