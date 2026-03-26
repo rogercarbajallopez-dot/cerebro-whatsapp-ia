@@ -855,8 +855,7 @@ class AnalizadorCorreos:
                     metadata_segura = {
                         "origen": "email_cerebro",
                         "correo_id": c_final.get('id'),
-                        "acciones_programadas": acciones_para_crear,
-                        "acciones_sugeridas": lista_tipos_accion
+                        "acciones_programadas": lista_tipos_accion
                     }
                     if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
                         metadata_segura['link_meet'] = "https://meet.google.com/new"
