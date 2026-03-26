@@ -2842,7 +2842,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         "origen": "whatsapp_cerebro",
                         "chat": nombre_display_actual,
                         "telefono": numero_tel,
-                        "acciones_programadas": lista_tipos_accion
+                        "acciones_programadas": acciones_para_crear
                     }
                     if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
                         metadata_segura['link_meet'] = "https://meet.google.com/new"
