@@ -2559,18 +2559,24 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                 
                 for m in lista_mensajes:
                     autor = "YO" if m['es_mio'] else nombre_display_actual
-                    # 👇👇 INICIO DE LA INTEGRACIÓN MULTIMEDIA 👇👇
-                    texto_final_mensaje = m['contenido']
-                    
+                    # MODIFICACIÓN BACKEND 2 — normalizar contenido multimedia antes de enviarlo a Gemini
+                    # El contenido de imágenes puede venir como "📷 Imagen_y342" desde Android
+                    # Gemini no necesita ver la posición Y, solo necesita saber que es una imagen
+                    contenido_raw = m['contenido']
+                    if m.get('tipo') == 'imagen':
+                        texto_final_mensaje = "📷 Imagen"   # normalizado, limpio para Gemini
+                    elif m.get('tipo') in ('audio', 'ptt'):
+                        texto_final_mensaje = "🎤 Audio"    # mismo criterio
+                    else:
+                        texto_final_mensaje = contenido_raw  # textos van intactos
+
                     # Extraer metadatos de forma segura
                     meta = m.get('metadata') or {}
-                    
+
                     # Si es una imagen y Tesseract logró leer algo, lo anexamos al contexto
                     if m.get('tipo') == 'imagen' and meta.get('texto_ocr'):
                         texto_final_mensaje += f" [TEXTO EXTRAÍDO DE LA IMAGEN: {meta.get('texto_ocr')}]"
-                        
-                    # Si es un documento, audio, etc., y tiene texto transcrito en metadata, puedes agregarlo igual
-                    # 👆👆 FIN DE LA INTEGRACIÓN MULTIMEDIA 👆👆
+                    
                     transcripcion += f"[{m['timestamp']}] {autor}: {texto_final_mensaje}\n"
                     
                     # Actualizamos también la condición para vectorizar para que tome en cuenta el texto final
@@ -3240,8 +3246,7 @@ async def procesar_ocr_imagen(
                     break
                 else:
                     print(f"⏳ Mensaje padre {mensaje_id} aún no indexado en Supabase. Reintentando {intento+1}/{max_intentos}...")
-                    import time
-                    time.sleep(2) # Esperar 2 segundos y volver a intentar
+                    await asyncio.sleep(2) # Esperar 2 segundos y volver a intentar
             
             # Solo inyectamos si el mensaje ya existe
             if mensaje_existe:
