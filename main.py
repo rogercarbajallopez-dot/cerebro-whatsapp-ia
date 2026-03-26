@@ -172,7 +172,7 @@ def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
 # ==========================================
 # 🔕 NUEVA FUNCIÓN: Push 100% Silencioso (Para WhatsApp)
 # ==========================================
-def enviar_push_silencioso(token: str, data_extra: dict = None):
+async def enviar_push_silencioso(token: str, data_extra: dict = None):
     """
     Envía notificación push puramente de datos (Data-only).
     Despierta la app para ejecutar acciones sin mostrar banners ni sonidos.
@@ -2719,7 +2719,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                                 "dato_extra": "{numero_tel}"
                             }}
                         }}
-                    ]
+                    ],
                     "observaciones_usuario": [],
                     "observaciones_contacto": []
                 }}
