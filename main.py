@@ -168,6 +168,39 @@ def enviar_push(token: str, titulo: str, cuerpo: str, data_extra: dict = None):
         print(f"❌ Error enviando push: {e}")
 # --- FIN CONFIGURACIÓN FIREBASE ---
 
+
+# ==========================================
+# 🔕 NUEVA FUNCIÓN: Push 100% Silencioso (Para WhatsApp)
+# ==========================================
+def enviar_push_silencioso(token: str, data_extra: dict = None):
+    """
+    Envía notificación push puramente de datos (Data-only).
+    Despierta la app para ejecutar acciones sin mostrar banners ni sonidos.
+    """
+    if not token or not firebase_admin._apps:
+        return
+    try:
+        data_limpia = {}
+        if data_extra:
+            for key, value in data_extra.items():
+                if isinstance(value, (list, dict)):
+                    data_limpia[key] = json.dumps(value)
+                elif value is None:
+                    data_limpia[key] = ""
+                else:
+                    data_limpia[key] = str(value)
+        
+        # 🔥 MAGIA QUIRÚRGICA: Solo enviamos 'data', omitimos 'notification'
+        msg = messaging.Message(
+            data=data_limpia, 
+            token=token
+        )
+        
+        messaging.send(msg)
+        print(f"🚀 [SILENCIOSO] Push de datos enviado exitosamente.")
+        
+    except Exception as e:
+        print(f"❌ Error enviando push silencioso: {e}")
 # ==========================================
 # 🔔 NUEVA FUNCIÓN: Busca el token por ti
 # ==========================================
@@ -2830,11 +2863,34 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         "metadata": metadata_segura 
                     }
 
-                    # 🔥 Se inserta en la BD de forma 100% silenciosa.
-                    # Cuando el usuario abra la app, la tabla "alertas" ya tendrá la metadata
-                    # lista y la UI de Flutter renderizará los botones de ejecución al instante.
-                    supabase.table('alertas').insert(datos_finales).execute()
-                # ---------------------------------------------------------
+                    # 🔥 Se inserta en la BD (Guardamos la respuesta para obtener el ID de la alerta)
+                    res_alerta = supabase.table('alertas').insert(datos_finales).execute()
+                    
+                    # --- [INSERCIÓN QUIRÚRGICA: RÉPLICA EXACTA DE CORREOS PERO SILENCIOSA] ---
+                    try:
+                        # 1. Obtener el token del usuario (Inyección rápida)
+                        user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id_real).execute()
+                        token_usuario = user_data.data[0].get('fcm_token') if user_data.data else None
+                        
+                        if token_usuario:
+                            alerta_id = res_alerta.data[0]['id'] if res_alerta.data else "0"
+                            
+                            # 2. Replicamos las variables EXACTAS que usas en Correos
+                            # Tu Flutter ya sabe leer esto a la perfección.
+                            data_silenciosa = {
+                                "tipo": "TAREA_EJECUTABLE",
+                                "alerta_id": str(alerta_id),
+                                "ejecutar_automatico": "true",  # 👈 LA LLAVE MAESTRA PARA FLUTTER
+                                "titulo": datos_finales['titulo'],
+                                "acciones_json": json.dumps(acciones_para_crear),
+                                "metadata": json.dumps(metadata_segura)
+                            }
+                            
+                            # 3. Llamamos a la función que omite lo visual
+                            await enviar_push_silencioso(token=token_usuario, data_extra=data_silenciosa)
+                            
+                    except Exception as e_push:
+                        print(f"⚠️ [AVISO] Se creó la alerta en WhatsApp pero falló la orden silenciosa: {e_push}")
 
                 # Marcar mensajes como procesados
                 if ids_a_procesar:
