@@ -875,7 +875,7 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
 
 
 
-async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 0) -> Dict:
+async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
     """
     FUSIÓN: Estructura robusta del Código B + Inteligencia de fechas/acciones del Código A.
     1. Usa el Prom5pt de Lista (A) para detectar múltiples acciones.
@@ -911,13 +911,11 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
     # Leemos la BD para saber qué existe antes de decidir.
     lista_pendientes_txt = "No hay tareas pendientes."
     try:
-        res_pendientes = await asyncio.to_thread(
-            lambda: supabase.table('alertas')\
-                .select('id, titulo, fecha_limite, metadata')\
-                .eq('usuario_id', usuario_id)\
-                .eq('estado', 'pendiente')\
-                .execute()
-        )
+        res_pendientes = supabase.table('alertas')\
+            .select('id, titulo, fecha_limite, metadata')\
+            .eq('usuario_id', usuario_id)\
+            .eq('estado', 'pendiente')\
+            .execute()
         
         if res_pendientes.data:
             # Formateamos incluyendo ID (UUID) y Título para desambiguación de nombres
@@ -1010,12 +1008,13 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
     """
 
     datos_finales = {}
+    acciones_para_metadata = [] # Lista para guardar las sub-acciones
 
     # --- 3. LLAMADA A IA (Estructura B con lógica de A) ---
     try:
         if not gemini_client: raise Exception("Cliente Gemini no disponible")
 
-        resp =  gemini_client.models.generate_content(
+        resp = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
@@ -1028,47 +1027,38 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
         if isinstance(lista_acciones, dict): lista_acciones = [lista_acciones]
 
         print(f"🤖 IA detectó {len(lista_acciones)} acciones.")
-    except Exception as e_ia:
-        print(f"🛑 Error Cognitivo: {e_ia}")
-        # ⚡ SOLUCIÓN 4: Restaurado el return faltante para que no siga ejecutando si falla la IA
-        return {"status": "error_ia", "respuesta": "Servicio de análisis temporalmente no disponible."}
+
     # Obtenemos Token para notificaciones (Necesario en todos los casos)
-    token_usuario = None
-    try:
-        user_data = await asyncio.to_thread(
-                    lambda: supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
-        )        
-        if user_data.data: token_usuario = user_data.data[0].get('fcm_token')
-    except: pass
+        token_usuario = None
+        try:
+            user_data = supabase.table('usuarios').select('fcm_token').eq('id', usuario_id).execute()
+            if user_data.data: token_usuario = user_data.data[0].get('fcm_token')
+        except: pass
 
-    resultado_acumulado = ""
-    contexto_final = contexto # Para retornar al final
-    # 👇 INYECCIÓN QUIRÚRGICA 1: Lista para agrupar creaciones 👇
-    acciones_para_crear = []
-    # --- BUCLE DE EJECUCIÓN INTELIGENTE ---
-    for item in lista_acciones:
-        macro = item.get('accion_macro', 'crear')
-        datos = item.get('datos', {})
-        id_bd = item.get('id_tarea_bd')
-        
-        # Saneamiento de fecha
-        fecha_iso = datos.get('fecha_iso')
-        if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
+        resultado_acumulado = ""
+        contexto_final = contexto # Para retornar al final
+        # 👇 INYECCIÓN QUIRÚRGICA 1: Lista para agrupar creaciones 👇
+        acciones_para_crear = []
+        # --- BUCLE DE EJECUCIÓN INTELIGENTE ---
+        for item in lista_acciones:
+            macro = item.get('accion_macro', 'crear')
+            datos = item.get('datos', {})
+            id_bd = item.get('id_tarea_bd')
+            
+            # Saneamiento de fecha
+            fecha_iso = datos.get('fecha_iso')
+            if fecha_iso and "T" not in fecha_iso: fecha_iso = f"{fecha_iso}T09:00:00"
 
-        # =================================================================
-        # CASO A: COMPLETAR / ELIMINAR (PUSH SILENCIOSO O NO MOLESTO)
-        # =================================================================
-        if macro == 'completar' and id_bd:
-            await asyncio.to_thread(
-                lambda: supabase.table('alertas').update({'estado': 'completado'}).eq('id', id_bd).execute()
-            )
-            if token_usuario:
-                try:
-                    # ⚡ SOLUCIÓN 2: Push sin bloquear el servidor
-                    await asyncio.to_thread(
-                        enviar_push,
+            # =================================================================
+            # CASO A: COMPLETAR / ELIMINAR (PUSH SILENCIOSO O NO MOLESTO)
+            # =================================================================
+            if macro == 'completar' and id_bd:
+                supabase.table('alertas').update({'estado': 'completado'}).eq('id', id_bd).execute()
+                
+                if token_usuario:
+                    enviar_push(
                         token=token_usuario,
-                        titulo="Oculto", 
+                        titulo="Oculto", # Mejor usar un push silencioso aquí
                         cuerpo="Oculto",
                         data_extra={
                             "tipo": "SYNC_COMMAND",       
@@ -1077,37 +1067,30 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
                             "titulo": datos.get('titulo', '')
                         }
                     )
-                except Exception as e_push: print(f"⚠️ Push Falló en Caso A: {e_push}")
-            resultado_acumulado += "✅ Tarea marcada como lista. "
+                resultado_acumulado += "✅ Tarea marcada como lista. "
 
-        # =================================================================
-        # CASO B: MODIFICAR (PUSH SILENCIOSO)
-        # =================================================================
-        elif macro == 'modificar' and id_bd:
-            payload = {'updated_at': datetime.now().isoformat()}
-            if fecha_iso: payload['fecha_limite'] = fecha_iso
-            if datos.get('titulo'): payload['titulo'] = datos['titulo']
-            
-            # Preservar metadata existente
-            try:
-                curr = await asyncio.to_thread(
-                    lambda: supabase.table('alertas').select('metadata').eq('id', id_bd).execute()
-                )                
-                if curr.data:
-                    meta = curr.data[0].get('metadata')
-                    if isinstance(meta, str): meta = json.loads(meta)
-                    if fecha_iso: meta['fecha_hora_especifica'] = fecha_iso
-                    payload['metadata'] = meta
-            except: pass
-
-            await asyncio.to_thread(
-                lambda: supabase.table('alertas').update(payload).eq('id', id_bd).execute()
-            )
-            if token_usuario and fecha_iso:
+            # =================================================================
+            # CASO B: MODIFICAR (PUSH SILENCIOSO)
+            # =================================================================
+            elif macro == 'modificar' and id_bd:
+                payload = {'updated_at': datetime.now().isoformat()}
+                if fecha_iso: payload['fecha_limite'] = fecha_iso
+                if datos.get('titulo'): payload['titulo'] = datos['titulo']
+                
+                # Preservar metadata existente
                 try:
-                    # ⚡ SOLUCIÓN 2: Push sin bloquear
-                    await asyncio.to_thread(
-                        enviar_push,
+                    curr = supabase.table('alertas').select('metadata').eq('id', id_bd).execute()
+                    if curr.data:
+                        meta = curr.data[0].get('metadata')
+                        if isinstance(meta, str): meta = json.loads(meta)
+                        if fecha_iso: meta['fecha_hora_especifica'] = fecha_iso
+                        payload['metadata'] = meta
+                except: pass
+
+                supabase.table('alertas').update(payload).eq('id', id_bd).execute()
+
+                if token_usuario and fecha_iso:
+                    enviar_push(
                         token=token_usuario,
                         titulo="Oculto",
                         cuerpo="Oculto",
@@ -1119,87 +1102,82 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
                             "nuevo_titulo": datos.get('titulo', ''),
                             "tipo_accion_nativa": datos.get('tipo_accion', 'poner_alarma')
                         }
-                except Exception as e_push: print(f"⚠️ Push Falló en Caso B: {e_push}")
-            resultado_acumulado += f"🔄 Reprogramado para {fecha_iso}. "
+                    )
+                resultado_acumulado += f"🔄 Reprogramado para {fecha_iso}. "
 
-        # =================================================================
-        # CASO C: CREAR (AGRUPAMOS EN LUGAR DE INSERTAR)
-        # =================================================================
-        elif macro == 'crear':
-            # Solo guardamos los datos en la lista de espera
-            acciones_para_crear.append({
-                "tipo": datos.get('tipo_accion', 'agendar_calendario'),
-                "titulo": datos.get('titulo', 'Nueva Tarea'),
-                "descripcion": datos.get('descripcion', mensaje),
-                "prioridad": datos.get('prioridad', 'MEDIA'),
-                "etiqueta": datos.get('etiqueta', 'OTROS'),
-                "fecha_hora_especifica": fecha_iso,
-                "dato_extra": datos.get('dato_extra')
-            })
+            # =================================================================
+            # CASO C: CREAR (AGRUPAMOS EN LUGAR DE INSERTAR)
+            # =================================================================
+            elif macro == 'crear':
+                # Solo guardamos los datos en la lista de espera
+                acciones_para_crear.append({
+                    "tipo": datos.get('tipo_accion', 'agendar_calendario'),
+                    "titulo": datos.get('titulo', 'Nueva Tarea'),
+                    "descripcion": datos.get('descripcion', mensaje),
+                    "prioridad": datos.get('prioridad', 'MEDIA'),
+                    "etiqueta": datos.get('etiqueta', 'OTROS'),
+                    "fecha_hora_especifica": fecha_iso,
+                    "dato_extra": datos.get('dato_extra')
+                })
 
-    # 👇 INYECCIÓN QUIRÚRGICA 2: EJECUTAR CREACIÓN Y UN SOLO PUSH 👇
-    if acciones_para_crear:
-        # Tomamos el título y datos principales de la primera acción de la lista (El "Tema Principal")
-        titulo_principal = acciones_para_crear[0].get('titulo', 'Nueva Tarea')
-        descripcion_principal = acciones_para_crear[0].get('descripcion', mensaje)
-        fecha_limite_principal = acciones_para_crear[0].get('fecha_hora_especifica')
-        
-        if not fecha_limite_principal:
-            fecha_limite_principal = f"{fecha_referencia}T09:00:00"
+        # 👇 INYECCIÓN QUIRÚRGICA 2: EJECUTAR CREACIÓN Y UN SOLO PUSH 👇
+        if acciones_para_crear:
+            # Tomamos el título y datos principales de la primera acción de la lista (El "Tema Principal")
+            titulo_principal = acciones_para_crear[0].get('titulo', 'Nueva Tarea')
+            descripcion_principal = acciones_para_crear[0].get('descripcion', mensaje)
+            fecha_limite_principal = acciones_para_crear[0].get('fecha_hora_especifica')
+            
+            if not fecha_limite_principal:
+                fecha_limite_principal = f"{fecha_referencia}T09:00:00"
 
-        # Inyectamos TODAS las acciones en el contexto (metadata)
-        contexto['acciones_programadas'] = acciones_para_crear
-        contexto['fecha_hora_especifica'] = fecha_limite_principal
-        if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
-            contexto['link_meet'] = "https://meet.google.com/new"
+            # Inyectamos TODAS las acciones en el contexto (metadata)
+            contexto['acciones_programadas'] = acciones_para_crear
+            contexto['fecha_hora_especifica'] = fecha_limite_principal
+            if any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
+                contexto['link_meet'] = "https://meet.google.com/new"
 
-        # Limpieza de metadata usando tu función original
-        metadata_segura = serializar_universal(contexto)
+            # Limpieza de metadata usando tu función original
+            metadata_segura = serializar_universal(contexto)
 
-        datos_finales = {
-            "usuario_id": usuario_id,
-            "titulo": titulo_principal,
-            "descripcion": descripcion_principal,
-            "prioridad": acciones_para_crear[0].get('prioridad', 'MEDIA'),
-            "tipo": "manual",
-            "estado": "pendiente",
-            "etiqueta": acciones_para_crear[0].get('etiqueta', 'OTROS'),
-            "fecha_limite": fecha_limite_principal,
-            "metadata": metadata_segura 
-        }
+            datos_finales = {
+                "usuario_id": usuario_id,
+                "titulo": titulo_principal,
+                "descripcion": descripcion_principal,
+                "prioridad": acciones_para_crear[0].get('prioridad', 'MEDIA'),
+                "tipo": "manual",
+                "estado": "pendiente",
+                "etiqueta": acciones_para_crear[0].get('etiqueta', 'OTROS'),
+                "fecha_limite": fecha_limite_principal,
+                "metadata": metadata_segura 
+            }
 
-        try:
-            # ⚡ SOLUCIÓN 2: Inserción asíncrona
-            res = await asyncio.to_thread(
-                lambda: supabase.table('alertas').insert(datos_finales).execute()
-            )
+            # 1. UNICA INSERCIÓN EN BD
+            res = supabase.table('alertas').insert(datos_finales).execute()
 
-            # Lógica Legacy Meet (completamente asíncrona)
+            # 2. Lógica Legacy Meet (Tu lógica async original intacta)
             if res.data and any(a.get('tipo') == 'crear_meet' for a in acciones_para_crear):
                 try:
+                    import asyncio
                     await asyncio.sleep(2)
-                    recarga = await asyncio.to_thread(
-                        lambda: supabase.table('alertas').select('metadata').eq('id', res.data[0]['id']).execute()
-                    )
+                    recarga = supabase.table('alertas').select('metadata').eq('id', res.data[0]['id']).execute()
                     if recarga.data:
                         meta_recargada = recarga.data[0].get('metadata', {})
                         if isinstance(meta_recargada, dict) and meta_recargada.get('link_meet'):
                             contexto['link_meet'] = meta_recargada['link_meet']
-                            metadata_segura = serializar_universal(contexto)
-                except Exception as e_meet: print(f"⚠️ Error recarga Meet: {e_meet}")
+                            metadata_segura = serializar_universal(contexto) # Actualizamos para el push
+                except: pass
 
-            # UN SOLO PUSH
+            # 3. UN SOLO PUSH CON TODAS LAS ACCIONES
             if token_usuario:
                 try:
                     meta_push = metadata_segura
                     if isinstance(meta_push, dict): meta_push = json.dumps(meta_push)
 
+                    # Le damos un toque amigable si hay varias acciones
                     cantidad = len(acciones_para_crear)
                     titulo_push = f"⚡ Agenda: {titulo_principal}" if cantidad == 1 else f"⚡ Agenda: {titulo_principal} (+{cantidad} acciones)"
 
-                    # ⚡ SOLUCIÓN 2: Push sin bloquear
-                    await asyncio.to_thread(
-                        enviar_push,
+                    enviar_push(
                         token=token_usuario,
                         titulo=titulo_push,
                         cuerpo=f"Agendado: {fecha_limite_principal}",
@@ -1208,43 +1186,45 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str, _reintentos: int = 
                             "alerta_id": str(res.data[0]['id']) if res.data else "0",
                             "ejecutar_automatico": "true",
                             "titulo": titulo_principal,
-                            "acciones_json": json.dumps(acciones_para_crear), 
+                            "acciones_json": json.dumps(acciones_para_crear), # <-- AQUI VIAJAN TODAS LAS ACCIONES AL CELULAR
                             "metadata": meta_push 
                         }
                     )
-                except Exception as e_p: print(f"⚠️ Error Push Crear: {e_p}")
+                except Exception as e_p: print(f"Error Push Crear: {e_p}")
 
             resultado_acumulado += f"✅ Agendado unificado: {titulo_principal}. "
             contexto_final = contexto
 
-        except Exception as e_bd:
-            print(f"🛑 Error de Escritura BD Principal: {e_bd}")
-            # ⚡ SOLUCIÓN 1 & 7: "Circuit Breaker" exacto para rescate de base de datos
-            if _reintentos == 0 and ("foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower()):
-                try:
-                    auth_user = await asyncio.to_thread(lambda: supabase.auth.get_user(usuario_id))
-                    if auth_user:
-                        await asyncio.to_thread(
-                            lambda: supabase.table('usuarios').insert({
-                                'id': usuario_id,
-                                'email': auth_user.user.email,
-                                'nombre': 'Usuario Recuperado'
-                            }).execute()
-                        )
-                        # Reintento recursivo SEGURO (máximo 1 vez)
-                        return await crear_tarea_directa(mensaje, usuario_id, _reintentos=1)
-                except Exception as e_res: print(f"🛑 Fallo en rescate: {e_res}")
-            
-            return {"status": "error_db", "respuesta": "No pude guardar la tarea. Por favor reinicia la sesión."}
-    # Retorno final unificado
-    return {
-        "status": "procesado",
-        "respuesta": resultado_acumulado,
-        "metadata": contexto_final,
-        "acciones": lista_acciones # Para debug visual
-    }    
+        # Retorno final unificado
+        return {
+            "status": "procesado",
+            "respuesta": resultado_acumulado,
+            "metadata": contexto_final,
+            "acciones": lista_acciones # Para debug visual
+        }    
 
-    
+    # --- 🔵 MANEJO DE ERRORES BD (Robustez del Código B) ---
+    except Exception as e_bd:
+        print(f"🛑 Error BD: {e_bd}")
+        # Intento de auto-creación de usuario (User Rescue)
+        if "foreign key" in str(e_bd).lower() or "violates" in str(e_bd).lower():
+            try:
+                auth_user = supabase.auth.get_user(usuario_id)
+                if auth_user:
+                    supabase.table('usuarios').insert({
+                        'id': usuario_id,
+                        'email': auth_user.user.email,
+                        'nombre': 'Usuario Recuperado'
+                    }).execute()
+                    # Reintento recursivo (solo una vez)
+                    return await crear_tarea_directa(mensaje, usuario_id) 
+            except:
+                pass
+        
+        return {
+            "status": "error_db", 
+            "respuesta": "No pude guardar la tarea. Por favor reinicia la sesión."
+        }
 
    
 async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo: bool) -> str:
