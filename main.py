@@ -2078,6 +2078,29 @@ async def actualizar_alerta(
         # Importante: Retornar error 400 permite a Flutter saber que algo falló
         raise HTTPException(status_code=400, detail=str(e))
 
+
+# NUEVO ENDPOINT — agregar después de @app.patch("/api/alertas/{alerta_id}")
+@app.delete("/api/alertas/{alerta_id}")
+async def eliminar_alerta(
+    alerta_id: str,
+    usuario_id: str = Depends(obtener_usuario_actual)
+):
+    try:
+        supabase.table('alertas')\
+            .delete()\
+            .eq('id', alerta_id)\
+            .eq('usuario_id', usuario_id)\
+            .execute()
+        return {"status": "eliminada", "id": alerta_id}
+    except Exception as e:
+        raise HTTPException(500, f"Error eliminando: {str(e)}")
+
+
+
+
+
+
+
 # 🔥 WEBHOOK WHATSAPP (CON RECONOCIMIENTO BIOMÉTRICO/TELÉFONO)
 @app.post("/webhook")
 async def webhook_whatsapp(request: Request):
