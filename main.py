@@ -1315,6 +1315,60 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
                 .order('score_importancia', desc=True)\
                 .limit(5)\
                 .execute()
+            
+            # CAMBIO 4: Cargar perfiles enriquecidos para consultas avanzadas
+            # Detectar si la consulta requiere información de contactos
+            palabras_perfil = ['cargo', 'empresa', 'gerente', 'director', 'jefe', 'finanzas',
+                                'compras', 'proveedor', 'cliente', 'vendió', 'compró', 'problema',
+                                'incidencia', 'queja', 'acuerdo', 'venta', 'listado', 'lista',
+                                'contacto', 'quién', 'quien', 'todos los', 'todas las', 'dame']
+            
+            mensaje_lower = mensaje.lower()
+            consulta_requiere_perfiles = any(p in mensaje_lower for p in palabras_perfil)
+            
+            perfiles_contexto = ""
+            if consulta_requiere_perfiles:
+                try:
+                    res_perfiles = supabase.table('perfiles_contactos_enriquecidos')\
+                        .select('remitente, nombre_detectado, cargo_detectado, empresa_detectada, '
+                                'dominio_empresa, tipo_relacion, nivel_decision, temas_principales, '
+                                'subtemas, resultados_interaccion, incidencias, ventas_o_acuerdos, '
+                                'total_correos, ultimo_contacto, requiere_seguimiento')\
+                        .eq('usuario_id', usuario_id)\
+                        .order('total_correos', desc=True)\
+                        .limit(50)\
+                        .execute()
+                    
+                    if res_perfiles.data:
+                        # Formatear de forma compacta para no inflar el prompt
+                        lineas_perfil = []
+                        for p in res_perfiles.data:
+                            cargo = p.get('cargo_detectado') or 'cargo desconocido'
+                            empresa = p.get('empresa_detectada') or p.get('dominio_empresa') or '?'
+                            temas = ', '.join((p.get('temas_principales') or [])[:4])
+                            resultados = p.get('resultados_interaccion') or {}
+                            problemas = resultados.get('problemas', 0)
+                            exitos = resultados.get('exitos', 0)
+                            nivel = p.get('nivel_decision') or '?'
+                            incidencias = p.get('incidencias') or []
+                            acuerdos = p.get('ventas_o_acuerdos') or []
+                            
+                            linea = (
+                                f"- {p['remitente']} | {p.get('nombre_detectado') or 'sin nombre'} | "
+                                f"{cargo} | {empresa} | nivel:{nivel} | relacion:{p.get('tipo_relacion','?')} | "
+                                f"temas:[{temas}] | exitos:{exitos} | problemas:{problemas} | "
+                                f"correos:{p.get('total_correos',0)}"
+                            )
+                            if incidencias:
+                                linea += f" | ultima_incidencia:{incidencias[-1].get('resumen','')[:60]}"
+                            if acuerdos:
+                                linea += f" | ultimo_acuerdo:{acuerdos[-1].get('detalle','')[:60]}"
+                            lineas_perfil.append(linea)
+                        
+                        perfiles_contexto = "\nPERFILES DE CONTACTOS DE EMAIL:\n" + "\n".join(lineas_perfil)
+                
+                except Exception as e_perf:
+                    print(f"⚠️ Error cargando perfiles para consulta: {e_perf}")
 
             res_memoria_reciente = supabase.table('memoria_chats')\
                 .select('chat_nombre, resumen_actual, temas_abiertos, ultima_actualizacion')\
@@ -1344,6 +1398,10 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
                     for m in res_memoria_reciente.data
                 ])
                 contexto_bd += mem_txt
+            
+            # CAMBIO 4B: Agregar perfiles al contexto si aplica
+            if perfiles_contexto:
+                contexto_bd += perfiles_contexto
             # --------------------------------------------------------
         # 🔥 NUEVO: AGREGAR ESTO - BUSCADOR DE MEMORIA INTELIGENTE
         # Buscamos en la base de datos recuerdos que se parezcan al tema que habla el usuario
