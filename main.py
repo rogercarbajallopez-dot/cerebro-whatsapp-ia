@@ -2837,8 +2837,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                 except Exception as e_ia:
                     error_str = str(e_ia)
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                        # 🛑 Inyectamos el "aborto" por cuota para proteger el sistema
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str or "UNAVAILABLE" in error_str:                        # 🛑 Inyectamos el "aborto" por cuota para proteger el sistema
                         print(f"🛑 Límite de cuota alcanzado. Deteniendo procesamiento para evitar errores mayores.")
                         return {"status": "error", "mensaje": "Cuota agotada, se reintentará en el próximo ciclo."}
                     
