@@ -87,7 +87,7 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
 
-MODELO_IA = "gemini-3.1-flash"
+MODELO_IA = "gemini-3.1-flash-latest"
 #MODELO_IA = "gemini-2.5-flash" 
 import firebase_admin
 from firebase_admin import credentials, messaging
