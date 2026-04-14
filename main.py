@@ -87,7 +87,7 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
 
-MODELO_IA = "gemini-2.5-flash" 
+  
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -2593,6 +2593,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             .eq('procesado_ia', False)\
             .order('chat_nombre', desc=False)\
             .order('timestamp', desc=False)\
+            .limit(100)\
             .execute()
         
         mensajes = response.data
@@ -2840,6 +2841,12 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     error_str = str(e_ia)
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str or "UNAVAILABLE" in error_str:                        # 🛑 Inyectamos el "aborto" por cuota para proteger el sistema
                         print(f"🛑 Límite de cuota alcanzado. Deteniendo procesamiento para evitar errores mayores.")
+                        
+                        # 🔥 SOLUCIÓN: Sacar estos mensajes de la cola ANTES de abortar
+                        #if ids_a_procesar:
+                        #    supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
+                        #    print(f"✅ Lote problemático ({len(ids_a_procesar)} msgs) marcado como procesado para liberar la cola.")
+
                         return {"status": "error", "mensaje": "Cuota agotada, se reintentará en el próximo ciclo."}
                     
                     print(f"❌ Error procesando con Gemini: {error_str}")
