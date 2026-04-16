@@ -78,6 +78,8 @@ def get_whisper_model():
     return whisper_model
 
 
+
+
 # 1. CARGA DE SECRETOS
 load_dotenv()
 API_KEY_GOOGLE = os.getenv('GOOGLE_API_KEY')
@@ -86,7 +88,7 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET')
 
-
+MODELO_IA = "gemini-2.5-flash"
   
 import firebase_admin
 from firebase_admin import credentials, messaging
@@ -656,7 +658,7 @@ async def clasificar_intencion_portero(mensaje: str) -> Dict:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                temperature=0.0
+                temperature=0.1
             )
         )
         return json.loads(response.text)
@@ -724,7 +726,8 @@ async def procesar_informacion_valor(mensaje: str, clasificacion: Dict, usuario_
             model=MODELO_IA,
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                temperature=0.1
             )
         )
         analisis = json.loads(response.text)
