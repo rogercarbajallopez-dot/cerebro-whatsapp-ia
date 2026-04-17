@@ -1531,27 +1531,32 @@ async def generar_embeddings_batch(textos: list):
         textos_limpios = [t.replace("\n", " ").strip() for t in textos if t.strip()]
         if not textos_limpios: return []
 
-        modelos = ["gemini-embedding-001", "models/gemini-embedding-001"]
+        modelo_actual = "gemini-embedding-001"
         
-        for modelo_actual in modelos:
-            try:
-                # Enviamos la LISTA completa (Batching)
-                result = gemini_client.models.embed_content(
-                    model=modelo_actual,
-                    contents=textos_limpios
-                )
-                
-                if result.embeddings:
-                    # Retorna una lista con los múltiples vectores individuales
-                    return [e.values for e in result.embeddings]
+        
+        try:
+            # Enviamos la LISTA completa (Batching)
+            result = gemini_client.models.embed_content(
+                model=modelo_actual,
+                contents=textos_limpios
+            )
             
-            except Exception as e_modelo:
-                continue # Falla silenciosa para probar el siguiente modelo
-
+            if result.embeddings:
+                # Retorna una lista con los múltiples vectores individuales
+                return [e.values for e in result.embeddings]
+        
+        except Exception as e_modelo:
+            print(f"❌ ERROR REAL en Embeddings ({modelo_actual}): {str(e_modelo)}")
+            # Propagación intencional para el cortafuegos del Cerebro
+            if "429" in str(e_modelo) or "RESOURCE_EXHAUSTED" in str(e_modelo):
+                raise e_modelo 
+                
         return []
 
     except Exception as e:
-        print(f"⚠️ Error generando batch embedding: {e}")
+        print(f"⚠️ Error fatal en batch embedding: {e}")
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            raise e
         return []
 
 
@@ -2596,7 +2601,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             .eq('procesado_ia', False)\
             .order('chat_nombre', desc=False)\
             .order('timestamp', desc=False)\
-            .limit(100)\
+            .limit(15)\
             .execute()
         
         mensajes = response.data
@@ -2651,8 +2656,18 @@ async def procesar_cerebro_interno(usuario_id_real: str):
         # ---------------------------------------------------------
         mensajes.sort(key=lambda x: x['numero_telefonico'])
         
-        for numero_tel, grupo in groupby(mensajes, key=lambda x: x['numero_telefonico']):
-            lista_mensajes = list(grupo)
+        # 🚦 INYECCIÓN QUIRÚRGICA 1: PAGINACIÓN INTELIGENTE (MAX 3 CHATS)
+        # Agrupamos todos los chats primero para poder contarlos y limitarlos
+        grupos_chats = [(key, list(group)) for key, group in groupby(mensajes, key=lambda x: x['numero_telefonico'])]
+        
+        if len(grupos_chats) > 3:
+            print(f"🚥 [TRÁFICO API] Se detectaron {len(grupos_chats)} chats distintos. Limitando a 3 por ciclo para cuidar la cuota.")
+            
+        # Tomamos SOLO los primeros 3 chats para evitar el Error 429
+        for numero_tel, lista_mensajes in grupos_chats[:3]:
+
+        #for numero_tel, grupo in groupby(mensajes, key=lambda x: x['numero_telefonico']):
+        #    lista_mensajes = list(grupo)
             
             # Guardamos el nombre más reciente usado en este lote
             nombre_display_actual = lista_mensajes[-1]['chat_nombre'] 
@@ -2746,7 +2761,14 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                             else:
                                 print(f" ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
                         except Exception as e_chroma:
-                            print(f" ⚠️ Error indexando en ChromaDB: {e_chroma}")
+                            error_str = str(e_chroma)
+                            # 🚨 EL CORTAFUEGOS: Atrapamos el error que ahora grita la función de embeddings
+                            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                                print(f"🛑 [EMBEDDINGS] Límite de cuota alcanzado. Abortando cerebro para proteger la API de Gemini.")
+                                # El return aborta la función por completo, evitando que se llame al resumen de texto
+                                return {"status": "error", "mensaje": "Cuota agotada en embeddings, se reintentará en el próximo ciclo."}
+                            else:
+                                print(f" ⚠️ Error indexando en ChromaDB: {error_str}")
                 
                 fecha_hora_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")             
 
