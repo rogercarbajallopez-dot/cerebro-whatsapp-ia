@@ -2601,7 +2601,6 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             .eq('procesado_ia', False)\
             .order('chat_nombre', desc=False)\
             .order('timestamp', desc=False)\
-            .limit(15)\
             .execute()
         
         mensajes = response.data
@@ -2737,41 +2736,58 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         "es_mio": m['es_mio']
                     } for m in mensajes_a_vectorizar]
 
-                    LIMITE_BATCH = 90
-                    for i in range(0, len(textos_batch), LIMITE_BATCH):
-                        sub_textos = textos_batch[i:i + LIMITE_BATCH]
-                        sub_ids = ids_batch[i:i + LIMITE_BATCH]
-                        sub_metadatas = metadatas_batch[i:i + LIMITE_BATCH]
+                    # ====================================================================
+                    # 🛠️ INICIO DEL BLOQUE QUIRÚRGICO REEMPLAZADO (SOLUCIÓN DE RAÍZ)
+                    # ====================================================================
+                    try:
+                        ids_existentes_chroma = set()
+                        if ids_batch:
+                            resultado_get = collection_mensajes.get(ids=ids_batch)
+                            ids_existentes_chroma = set(resultado_get.get('ids', []))
+                    except Exception:
+                        ids_existentes_chroma = set()
+
+                    # Filtrar solo los que realmente necesitan vectorizarse
+                    indices_nuevos = [
+                        i for i, id_msg in enumerate(ids_batch)
+                        if id_msg not in ids_existentes_chroma
+                    ]
+
+                    if not indices_nuevos:
+                        # Todos ya están en ChromaDB — cero llamadas a la API
+                        print(f" ♻️ ChromaDB: {len(ids_batch)} mensajes ya vectorizados. Saltando API.")
+                    else:
+                        # Solo vectorizar los que faltan
+                        sub_textos   = [textos_batch[i] for i in indices_nuevos]
+                        sub_ids      = [ids_batch[i] for i in indices_nuevos]
+                        sub_metadatas = [metadatas_batch[i] for i in indices_nuevos]
 
                         try:
-                            # Una sola llamada a la API para todos los mensajes de este chat
-                            vectores_batch = await generar_embeddings_batch(textos_batch)
+                            vectores_nuevos = await generar_embeddings_batch(sub_textos)
                             await asyncio.sleep(2)
-                            if vectores_batch and len(vectores_batch) == len(textos_batch):
+
+                            if vectores_nuevos and len(vectores_nuevos) == len(sub_textos):
                                 collection_mensajes.add(
-                                    ids=ids_batch,
-                                    embeddings=vectores_batch,
-                                    documents=textos_batch,
-                                    metadatas=metadatas_batch
+                                    ids=sub_ids,
+                                    embeddings=vectores_nuevos,
+                                    documents=sub_textos,
+                                    metadatas=sub_metadatas
                                 )
-                                # Imprimimos confirmación
-                                print(f" ✅ ChromaDB: {len(vectores_batch)} vectores guardados (1 petición API).")
-                                # Pausa de cortesía para el embedding
-                            
+                                print(f" ✅ ChromaDB: {len(vectores_nuevos)} vectores nuevos guardados.")
                             else:
-                                print(f" ⚠️ Falló la vectorización por lote para {nombre_display_actual}.")
+                                print(f" ⚠️ Falló la vectorización para {nombre_display_actual}.")
+
                         except Exception as e_chroma:
                             error_str = str(e_chroma)
-                            # 🚨 EL CORTAFUEGOS: Atrapamos el error que ahora grita la función de embeddings
                             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                                print(f"🛑 [EMBEDDINGS] Límite de cuota alcanzado. Abortando cerebro para proteger la API de Gemini.")
-                                # El return aborta la función por completo, evitando que se llame al resumen de texto
-                                return {"status": "error", "mensaje": "Cuota agotada en embeddings, se reintentará en el próximo ciclo."}
+                                print(f"🛑 [EMBEDDINGS] Cuota alcanzada. Abortando para proteger la API.")
+                                return {"status": "error", "mensaje": "Cuota agotada en embeddings."}
                             else:
                                 print(f" ⚠️ Error indexando en ChromaDB: {error_str}")
-                
-                fecha_hora_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")             
 
+          
+                fecha_hora_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")             
+                # FASE 2: ANÁLISIS LLM (Prompt a Gemini)
                 # Prompt Gemini
                 prompt = f"""
 
@@ -2863,19 +2879,27 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     datos_ia = json.loads(response.text)
 
                 except Exception as e_ia:
-                    error_str = str(e_ia)
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str or "UNAVAILABLE" in error_str:                        # 🛑 Inyectamos el "aborto" por cuota para proteger el sistema
-                        print(f"🛑 Límite de cuota alcanzado. Deteniendo procesamiento para evitar errores mayores.")
-                        
-                        # 🔥 SOLUCIÓN: Sacar estos mensajes de la cola ANTES de abortar
-                        #if ids_a_procesar:
-                        #    supabase.table('mensajes_whatsapp').update({'procesado_ia': True}).in_('id', ids_a_procesar).execute()
-                        #    print(f"✅ Lote problemático ({len(ids_a_procesar)} msgs) marcado como procesado para liberar la cola.")
-
-                        return {"status": "error", "mensaje": "Cuota agotada, se reintentará en el próximo ciclo."}
+                    error_str = str(e_ia).upper()
                     
-                    print(f"❌ Error procesando con Gemini: {error_str}")
-                    continue
+                    # 1. ERRORES DE CUOTA (429) - Límite de la API alcanzado
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+                        print(f"🛑 [API GEMINI - CUOTA] Límite 429 alcanzado. Abortando procesamiento de este usuario.")
+                        # Al hacer 'return', matamos la función aquí. Los mensajes no se marcan como procesados.
+                        # El Scheduler de 30 minutos volverá a llamar a esta función automáticamente.
+                        return {"status": "error", "mensaje": "Cuota 429 agotada. Pausa hasta el próximo ciclo de 30 min."}
+                        
+                    # 2. ERRORES DE SISTEMA (50x) - Falla en los servidores de Google
+                    elif "503" in error_str or "500" in error_str or "UNAVAILABLE" in error_str or "INTERNAL" in error_str:
+                        print(f"⚠️ [API GEMINI - SISTEMA] Servidores de Google saturados/caídos (50x). Abortando.")
+                        # Igual que la cuota: abortamos y dejamos que el Scheduler intente en 30 minutos.
+                        return {"status": "error", "mensaje": "Error de sistema en Google. Pausa hasta el próximo ciclo."}
+                        
+                    # 3. ERRORES DE LÓGICA (400) o JSON Malformado
+                    else:
+                        print(f"❌ [API GEMINI - LÓGICA/JSON] Fallo en chat '{nombre_display_actual}': {error_str}")
+                        # Aquí NO hacemos un return, porque el problema es específico de este chat (ej. un texto muy raro).
+                        # Hacemos 'continue' para saltar al siguiente chat de la cola de los 3 seleccionados.
+                        continue
 
                 # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
