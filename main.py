@@ -1528,36 +1528,54 @@ async def generar_embeddings_batch(textos: list):
             return []
 
         # Limpiamos la lista y evitamos textos vacíos
-        textos_limpios = [t.replace("\n", " ").strip() for t in textos if t.strip()]
-        if not textos_limpios: return []
+        # ✅ SOLUCIÓN CRÍTICA: Mantener la longitud exacta del array
+        textos_limpios = [(t.replace("\n", " ").strip() or "mensaje_vacio") for t in textos]
 
-        modelo_actual = "gemini-embedding-001"
-        
-        
-        try:
-            # Enviamos la LISTA completa (Batching)
-            result = gemini_client.models.embed_content(
-                model=modelo_actual,
-                contents=textos_limpios
-            )
-            
-            if result.embeddings:
-                # Retorna una lista con los múltiples vectores individuales
-                return [e.values for e in result.embeddings]
-        
-        except Exception as e_modelo:
-            print(f"❌ ERROR REAL en Embeddings ({modelo_actual}): {str(e_modelo)}")
-            # Propagación intencional para el cortafuegos del Cerebro
-            if "429" in str(e_modelo) or "RESOURCE_EXHAUSTED" in str(e_modelo):
-                raise e_modelo 
+        LIMITE_API = 90  # Margen de seguridad bajo el límite de 100 de Gemini
+        modelo = "gemini-embedding-001"
+        todos_los_vectores = []
+
+        # Procesar en sub-lotes de máximo 90 para no exceder el límite de la API
+        for inicio in range(0, len(textos_limpios), LIMITE_API):
+            sub_lote = textos_limpios[inicio : inicio + LIMITE_API]
+
+            try:
+                result = gemini_client.models.embed_content(
+                    model=modelo,
+                    contents=sub_lote
+                )
                 
-        return []
+                if result.embeddings:
+                    todos_los_vectores.extend([e.values for e in result.embeddings])
+                else:
+                    # Si un sub-lote falla parcialmente, rellena con None para mantener alineación
+                    todos_los_vectores.extend([None] * len(sub_lote))
+                    print(f"⚠️ Sub-lote {inicio}-{inicio+len(sub_lote)} no devolvió embeddings.")
 
+                # Pausa entre sub-lotes para no saturar la API de embeddings
+                if inicio + LIMITE_API < len(textos_limpios):
+                    await asyncio.sleep(3)
+
+            except Exception as e_sub:
+                error_str = str(e_sub)
+                print(f"❌ ERROR REAL en Embeddings ({modelo}): {error_str}")
+                # Si falla CUALQUIER sub-lote, abortamos la creación del lote entero 
+                # para evitar desalineación de índices en ChromaDB.
+                raise e_sub 
+
+        # Verificación de integridad final
+        if len(todos_los_vectores) != len(textos_limpios):
+            raise ValueError(f"Desalineación fatal: {len(textos_limpios)} textos vs {len(todos_los_vectores)} vectores.")
+            
+        return todos_los_vectores
+
+       
     except Exception as e:
         print(f"⚠️ Error fatal en batch embedding: {e}")
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+        # Burbujear el error 429 hacia procesar_cerebro_interno
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "QUOTA" in str(e).upper():
             raise e
-        return []
+        return [None] * len(textos)
 
 
 async def generar_embedding(texto: str):
@@ -2601,6 +2619,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             .eq('procesado_ia', False)\
             .order('chat_nombre', desc=False)\
             .order('timestamp', desc=False)\
+            .limit(180)\
             .execute()
         
         mensajes = response.data
@@ -2657,8 +2676,9 @@ async def procesar_cerebro_interno(usuario_id_real: str):
         
         # 🚦 INYECCIÓN QUIRÚRGICA 1: PAGINACIÓN INTELIGENTE (MAX 3 CHATS)
         # Agrupamos todos los chats primero para poder contarlos y limitarlos
-        grupos_chats = [(key, list(group)) for key, group in groupby(mensajes, key=lambda x: x['numero_telefonico'])]
-        
+        grupos_chats = [(key, list(group)[:60]) for key, group in 
+                groupby(mensajes, key=lambda x: x['numero_telefonico'])]
+
         if len(grupos_chats) > 3:
             print(f"🚥 [TRÁFICO API] Se detectaron {len(grupos_chats)} chats distintos. Limitando a 3 por ciclo para cuidar la cuota.")
             
@@ -2681,15 +2701,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
             print(f"🤖 [BACKGROUND] Analizando chat: {nombre_display_actual} (Ancla: {numero_tel}) ({len(lista_mensajes)} msgs)")
             
             try:
-                # 🔥 BUSCAR MEMORIA POR EL ANCLA INMUTABLE (Teléfono o ID de Grupo)
-                memoria_db = supabase.table('memoria_chats')\
-                    .select('*')\
-                    .eq('numero_telefonico', numero_tel)\
-                    .eq('usuario_id', usuario_id_real)\
-                    .execute()
-                    
-                contexto_previo = memoria_db.data[0].get('resumen_actual', 'Sin historial previo.') if memoria_db.data else "Sin historial previo."
-
+                
                 # Indexación ChromaDB
                 # 1. Preparar transcripción para el resumen
                 transcripcion = ""
@@ -2725,6 +2737,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         mensajes_a_vectorizar.append(m_vector)
 
                 # 2. Indexación ChromaDB con BATCHING (Rápido y ahorra cuota)
+                embedding_exitoso = False
                 if mensajes_a_vectorizar:
                     textos_batch = [m['contenido'] for m in mensajes_a_vectorizar]
                     ids_batch = [str(m['id']) for m in mensajes_a_vectorizar]
@@ -2756,6 +2769,8 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     if not indices_nuevos:
                         # Todos ya están en ChromaDB — cero llamadas a la API
                         print(f" ♻️ ChromaDB: {len(ids_batch)} mensajes ya vectorizados. Saltando API.")
+                        embedding_exitoso = True
+
                     else:
                         # Solo vectorizar los que faltan
                         sub_textos   = [textos_batch[i] for i in indices_nuevos]
@@ -2764,30 +2779,65 @@ async def procesar_cerebro_interno(usuario_id_real: str):
 
                         try:
                             vectores_nuevos = await generar_embeddings_batch(sub_textos)
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(4)
 
-                            if vectores_nuevos and len(vectores_nuevos) == len(sub_textos):
+                            # Filtrar alineación: solo guardar los que tienen vector válido
+                            pares_validos = [(sub_ids[i], sub_textos[i], sub_metadatas[i], v)
+                                            for i, v in enumerate(vectores_nuevos)
+                                            if v is not None and i < len(sub_ids)]
+
+                            if pares_validos:
+                                ids_v, textos_v, metas_v, vecs_v = zip(*pares_validos)
                                 collection_mensajes.add(
-                                    ids=sub_ids,
-                                    embeddings=vectores_nuevos,
-                                    documents=sub_textos,
-                                    metadatas=sub_metadatas
+                                    ids=list(ids_v),
+                                    embeddings=list(vecs_v),
+                                    documents=list(textos_v),
+                                    metadatas=list(metas_v)
                                 )
-                                print(f" ✅ ChromaDB: {len(vectores_nuevos)} vectores nuevos guardados.")
+                                print(f" ✅ ChromaDB: {len(pares_validos)} vectores nuevos guardados.")
+                                embedding_exitoso = True
                             else:
-                                print(f" ⚠️ Falló la vectorización para {nombre_display_actual}.")
+                                print(f" ⚠️ Ningún vector válido para {nombre_display_actual}.")
 
-                        except Exception as e_chroma:
-                            error_str = str(e_chroma)
+                        except Exception as e_emb:
+                            error_str = str(e_emb)
                             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                                print(f"🛑 [EMBEDDINGS] Cuota alcanzada. Abortando para proteger la API.")
-                                return {"status": "error", "mensaje": "Cuota agotada en embeddings."}
+                                print(f"🛑 [EMBEDDINGS] Cuota 429. Abortando ciclo completo.")
+                                return {"status": "cuota_embeddings", 
+                                        "mensaje": "Cuota de embeddings agotada. Reintento en 30 min."}
                             else:
-                                print(f" ⚠️ Error indexando en ChromaDB: {error_str}")
+                                print(f" ⚠️ Error en embedding: {error_str}")
+                                print(f" ⏭️ Saltando chat {nombre_display_actual} para no perder los vectores. Se reintentará luego.")
+                                continue
+                                # No abortamos: intentamos el análisis LLM igual
+                                # Los mensajes no quedarán vectorizados pero sí analizado
+                
+                
+                
+                 # ============================================================
+                if embedding_exitoso and ids_a_procesar:
+                    try:
+                        supabase.table('mensajes_whatsapp')\
+                            .update({'embeddings_guardados': True})\
+                            .in_('id', ids_a_procesar)\
+                            .execute()
+                    except Exception as e_mark:
+                        print(f"⚠️ No se pudo marcar embeddings_guardados: {e_mark}")
 
-          
-                fecha_hora_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")             
-                # FASE 2: ANÁLISIS LLM (Prompt a Gemini)
+                # ============================================================
+                # FASE 2: ANÁLISIS LLM (Gemini 2.5 Flash)
+                # Estrategia RAG: contexto previo + transcripción → JSON estructurado
+                # ============================================================
+                memoria_db = supabase.table('memoria_chats')\
+                    .select('resumen_actual')\
+                    .eq('numero_telefonico', numero_tel)\
+                    .eq('usuario_id', usuario_id_real)\
+                    .execute()
+                contexto_previo = (memoria_db.data[0].get('resumen_actual', 'Sin historial previo.')
+                                   if memoria_db.data else "Sin historial previo.")
+                
+                zona_peru = pytz.timezone('America/Lima')
+                fecha_hora_actual = datetime.now(zona_peru).strftime("%Y-%m-%d %H:%M:%S")                # FASE 2: ANÁLISIS LLM (Prompt a Gemini)
                 # Prompt Gemini
                 prompt = f"""
 
@@ -2896,10 +2946,19 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                         
                     # 3. ERRORES DE LÓGICA (400) o JSON Malformado
                     else:
-                        print(f"❌ [API GEMINI - LÓGICA/JSON] Fallo en chat '{nombre_display_actual}': {error_str}")
+                        print(f"❌ [GEMINI - LÓGICA] Fallo en chat '{nombre_display_actual}': {error_str}")
                         # Aquí NO hacemos un return, porque el problema es específico de este chat (ej. un texto muy raro).
                         # Hacemos 'continue' para saltar al siguiente chat de la cola de los 3 seleccionados.
+                        if ids_a_procesar:
+                            supabase.table('mensajes_whatsapp')\
+                                .update({'procesado_ia': True})\
+                                .in_('id', ids_a_procesar)\
+                                .execute()
+                            print(f"⚠️ Mensajes marcados como procesados (error de lógica irrecuperable).")
                         continue
+                
+                if datos_ia is None:
+                    continue
 
                 # 🔥 GUARDAR MEMORIA VINCULADA AL ANCLA (Número o Grupo)
                 datos_memoria = {
@@ -2907,7 +2966,7 @@ async def procesar_cerebro_interno(usuario_id_real: str):
                     'numero_telefonico': numero_tel,      # El ancla inmutable
                     'usuario_id': usuario_id_real,
                     'resumen_actual': datos_ia.get('nuevo_resumen', contexto_previo),
-                    'ultima_actualizacion': datetime.utcnow().isoformat(),
+                    'ultima_actualizacion': datetime.now(timezone.utc).isoformat(),
                     'temas_abiertos': datos_ia.get('intencion', 'OTROS'),
                     'vinculo_detectado': datos_ia.get('vinculo', 'Desconocido')
                 }
