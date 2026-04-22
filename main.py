@@ -1021,7 +1021,9 @@ async def crear_tarea_directa(mensaje: str, usuario_id: str) -> Dict:
         resp = gemini_client.models.generate_content(
             model=MODELO_IA,
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(response_mime_type="application/json",
+            temperature=0.1
+            )
         )
 
         texto_limpio = resp.text.replace("```json", "").replace("```", "").strip()
@@ -1488,32 +1490,72 @@ async def procesar_consulta_rapida(mensaje: str, usuario_id: str, modo_profundo:
 # 🧠 CEREBRO IA: MEMORIA Y VECTORES
 # ==============================================================================
 # 🔥 NUEVO: EL MOTOR EN SEGUNDO PLANO
+
+
 async def ejecutar_cerebro_ia():
-    """Esta función será llamada por tu Scheduler cada 10 minutos."""
-    print("🔄 [SCHEDULER] Iniciando ciclo de análisis IA (Cerebro)...")
+    """Esta función evalúa si vale la pena encender el procesamiento de IA."""
+    print("🔄 [SCHEDULER] Iniciando evaluación de análisis IA (Cerebro)...")
     try:
-        # Buscar usuarios con mensajes pendientes (procesado_ia = False)
         response = supabase.table('mensajes_whatsapp')\
-            .select('usuario_id')\
+            .select('usuario_id, created_at')\
             .eq('procesado_ia', False)\
             .execute()
         
-        usuarios_pendientes = list(set([row['usuario_id'] for row in response.data]))
-        
-        if not usuarios_pendientes:
-            print("💤 [SCHEDULER] Nada nuevo. Cerebro en reposo.")
+        mensajes_pendientes = response.data
+        if not mensajes_pendientes:
+            print("💤 [SCHEDULER] Nada nuevo. Cerebro en reposo total.")
             return
 
-        print(f"🚀 [SCHEDULER] Procesando {len(usuarios_pendientes)} usuarios con mensajes pendientes...")
+        stats_usuarios = {}
+        for m in mensajes_pendientes:
+            uid = m['usuario_id']
+            
+            # --- BLOQUE DE PARSEO BLINDADO ---
+            try:
+                fecha_str = str(m['created_at'])
+                fecha_str = fecha_str.replace(' ', 'T').replace('Z', '+00:00')
+                if fecha_str.endswith('+00'):
+                    fecha_str += ':00'
+                dt_creacion = datetime.fromisoformat(fecha_str)
+            except Exception as e:
+                print(f"⚠️ [AVISO] Fallo al leer fecha '{m.get('created_at')}': {e}. Fallback a hora actual.")
+                dt_creacion = datetime.now(timezone.utc)
+            # ----------------------------------
+
+            if uid not in stats_usuarios:
+                stats_usuarios[uid] = {"total": 0, "mas_antiguo": dt_creacion}
+            
+            stats_usuarios[uid]["total"] += 1
+            if dt_creacion < stats_usuarios[uid]["mas_antiguo"]:
+                stats_usuarios[uid]["mas_antiguo"] = dt_creacion
+
+        MIN_MENSAJES = 40        
+        MAX_HORAS_ESPERA = 3.5   
         
-        for user_id in usuarios_pendientes:
-            print(f"   -> Despertando cerebro para usuario: {user_id}")
-            # Llama a tu función principal (la que arreglamos en el mensaje anterior)
+        usuarios_a_procesar = []
+        ahora = datetime.now(timezone.utc)
+
+        for uid, stats in stats_usuarios.items():
+            horas_espera = (ahora - stats["mas_antiguo"]).total_seconds() / 3600
+            
+            if stats["total"] >= MIN_MENSAJES or horas_espera >= MAX_HORAS_ESPERA:
+                usuarios_a_procesar.append(uid)
+            else:
+                print(f"⏸️ [AHORRO API] Usuario {uid} en espera. Mensajes: {stats['total']}/{MIN_MENSAJES}. Antigüedad: {horas_espera:.1f}h/{MAX_HORAS_ESPERA}h.")
+
+        if not usuarios_a_procesar:
+            print("💤 [SCHEDULER] Nadie cumple los umbrales. Acumulando más mensajes para ahorrar tokens.")
+            return
+
+        print(f"🚀 [SCHEDULER] Despertando Cerebro para {len(usuarios_a_procesar)} usuarios...")
+        for user_id in usuarios_a_procesar:
+            print(f"   -> Procesando usuario: {user_id}")
             await procesar_cerebro_interno(user_id)
-            await asyncio.sleep(5) # Pausa de cortesía entre usuarios
+            await asyncio.sleep(5) 
 
     except Exception as e:
         print(f"❌ [SCHEDULER] Error en el ciclo del Cerebro: {e}")
+
 
 
 async def generar_embeddings_batch(textos: list):
