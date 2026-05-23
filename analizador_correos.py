@@ -232,12 +232,40 @@ class AnalizadorCorreos:
             'urgencia': 'baja', 'resumen_corto': 'Error al clasificar (Cuota/API)'
         } for i in range(len(lote_correos))]
 
-    
+    def _limpiar_cuerpo_para_ia(self, cuerpo: str, max_chars: int = 1000) -> str:
+        """Elimina etiquetas HTML, disclaimers corporativos y exceso de espacios."""
+        
+        if not cuerpo: return ""
+        
+        # 1. Eliminar todas las etiquetas HTML
+        cuerpo_limpio = re.sub(r'<[^>]+>', ' ', cuerpo)
+        
+        # 2. Eliminar disclaimers legales repetitivos comunes en bancos (Mibanco, BCP, etc.)
+        cuerpo_limpio = re.sub(
+            r'(El sistema de correo electrónico.*?notificar al remitente\.|Este mensaje y sus archivos adjuntos van dirigidos|Antes de imprimir este mensaje, asegúrese)', 
+            '[Disclaimer corporativo omitido]', 
+            cuerpo_limpio, 
+            flags=re.DOTALL | re.IGNORECASE
+        )
+        
+        # 3. Colapsar múltiples espacios y saltos de línea en un texto limpio
+        cuerpo_limpio = re.sub(r'\s+', ' ', cuerpo_limpio).strip()
+        
+        return cuerpo_limpio[:max_chars]
+        
     # ================================================================
     # MODIFICAR LA FUNCIÓN `analizar_profundo` (REEMPLAZAR LA EXISTENTE)
     # ================================================================
     
-    async def analizar_profundo(self, lote_datos: List[Dict], gemini_client, supabase_client, usuario_id) -> List[Dict]:
+    async def analizar_profundo(
+        self, 
+        lote_datos: List[Dict], 
+        gemini_client, 
+        supabase_client, 
+        usuario_id,
+        fn_actualizar_perfil=None,    # <-- Nuevo parámetro
+        fn_generar_embeddings=None     # <-- Nuevo parámetro
+    ) -> List[Dict]:
         
         
         fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -305,7 +333,7 @@ class AnalizadorCorreos:
             if obs_c or obs_u:
                 contexto_hist += f"\n{obs_c}\n{obs_u}\n"
             # -----------------------------------------------------------
-
+            cuerpo_limpio = self._limpiar_cuerpo_para_ia(correo.get('cuerpo', ''), max_chars=1000)
         # Acumular el texto para este correo en el súper-prompt
             textos_prompt += f"""
                 --- ID_CORREO: {item['id_correo']} ---
@@ -324,7 +352,7 @@ class AnalizadorCorreos:
         HOY ES: {fecha_actual}
         INVENTARIO DE TAREAS PENDIENTES: 
         {lista_pendientes_txt}
-        {contexto_hist}
+        
 
         {textos_prompt}
 
@@ -404,8 +432,69 @@ class AnalizadorCorreos:
                        
             )
             resultados = json.loads(response.text)
+
+            # ... (Justo después de 'resultados = json.loads(response.text)') ...
+
+            # ============================================================
+            # AUTO-ALIMENTAR perfil_usuario DESDE ANÁLISIS DE CORREOS
+            # ============================================================
+            filas_perfil_batch = []
+            for res in resultados:
+                perfil_c = res.get('perfil_contacto', {})
+                if not perfil_c: continue
+                
+                # 1. Detectar Tono
+                tono = res.get('tono_detectado', '').lower()
+                if tono in ('formal', 'informal'):
+                    filas_perfil_batch.append({
+                        'usuario_id': usuario_id,
+                        'dato': f'[NIVEL_FORMALIDAD] En Gmail suele usar un tono {tono}.',
+                        'categoria': 'AUTO_GMAIL',
+                        'fuente': f'gmail_{res.get("id_correo")}',
+                        'peso': 0.65,
+                        'ultima_confirmacion': datetime.now(timezone.utc).isoformat()
+                    })
+
+                # 2. Detectar Estrategia de Negocio
+                estrategia = perfil_c.get('estrategia_o_estilo')
+                tipo_rel = perfil_c.get('tipo_relacion')
+                if estrategia and tipo_rel in ('cliente', 'proveedor'):
+                    filas_perfil_batch.append({
+                        'usuario_id': usuario_id,
+                        'dato': f'[NEGOCIO] Estilo con {tipo_rel}s: {estrategia[:180]}',
+                        'categoria': 'AUTO_GMAIL',
+                        'fuente': 'gmail_analisis_negocio',
+                        'peso': 0.70,
+                        'ultima_confirmacion': datetime.now(timezone.utc).isoformat()
+                    })
+
+            # Ejecutar carga masiva de datos de perfil
+            if filas_perfil_batch:
+                try:
+                    supabase_client.table('perfil_usuario').upsert(
+                        filas_perfil_batch, on_conflict='usuario_id, dato'
+                    ).execute()
+                    
+                    # IMPORTANTE: Gatillo para comprimir el cerebro
+                    # Importamos aquí para evitar importaciones circulares
+                    if fn_actualizar_perfil:
+                        await fn_actualizar_perfil(usuario_id)
+                except Exception as e:
+                    print(f"⚠️ Error en auto-alimentación perfil (Gmail): {e}")
+
+            # Vectorización semántica
+            await self._vectorizar_correos_analizados(
+                resultados=resultados,
+                lote_datos=lote_datos,
+                usuario_id=usuario_id,
+                supabase_client=supabase_client,
+                gemini_client=gemini_client,
+                fn_generar_embeddings=fn_generar_embeddings # <-- Propagación
+            )
+
             return sorted(resultados, key=lambda x: x.get('id_correo', 0))
-        
+            
+            
         except Exception as e:
             print(f"Error en análisis profundo: {e}")
             return [{
@@ -544,6 +633,98 @@ class AnalizadorCorreos:
                 'obs_contacto_txt': "",
                 'obs_usuario_txt': "",
             }
+    
+    async def _vectorizar_correos_analizados(
+        self,
+        resultados: list,
+        lote_datos: list,
+        usuario_id: str,
+        supabase_client,
+        gemini_client,
+        fn_generar_embeddings=None
+
+    ):
+        """
+        [VERSIÓN OPTIMIZADA] Vectoriza extractos semánticos de correos.
+        """
+        filas_para_vectorizar = []
+        
+        for item, resultado in zip(lote_datos, resultados):
+            correo = item['correo']
+            perfil_c = resultado.get('perfil_contacto', {})
+            
+            # Texto indexado enriquecido: Priorizamos lo que la IA entendió + extracto
+            temas = ", ".join(perfil_c.get('temas_nuevos', []))
+            sintesis = resultado.get('sintesis_alerta', '')
+            
+            texto_indexado = (
+                f"ASUNTO: {correo.get('asunto', '')}\n"
+                f"REMITENTE: {correo.get('de', '')}\n"
+                f"TEMAS CLAVE: {temas}\n"
+                f"SÍNTESIS EJECUTIVA: {sintesis}\n"
+                f"EXTRACTO DEL CUERPO: {correo.get('cuerpo', '')[:500]}"
+            )
+            
+            try:
+                # Obtenemos el ID interno de la tabla correos_analizados
+                correo_db = supabase_client.table('correos_analizados')\
+                    .select('id')\
+                    .eq('id_correo_gmail', correo.get('id', ''))\
+                    .eq('usuario_id', usuario_id)\
+                    .execute()
+                
+                if correo_db.data:
+                    filas_para_vectorizar.append({
+                        'correo_db_id': correo_db.data[0]['id'],
+                        'texto': texto_indexado,
+                        'remitente': correo.get('de', ''),
+                        'asunto': correo.get('asunto', ''),
+                        'temas': perfil_c.get('temas_nuevos', []),
+                        'fecha': correo.get('fecha')
+                    })
+            except Exception as e:
+                print(f"⚠️ Error vinculando ID de correo para vector: {e}")
+
+        if not filas_para_vectorizar: return
+
+        # 1. Deduplicación: No vectorizar lo que ya existe
+        ids_db = [f['correo_db_id'] for f in filas_para_vectorizar]
+        existentes = supabase_client.table('correos_vectores').select('correo_id').in_('correo_id', ids_db).execute()
+        ids_existentes = {r['correo_id'] for r in (existentes.data or [])}
+        
+        nuevos = [f for f in filas_para_vectorizar if f['correo_db_id'] not in ids_existentes]
+        if not nuevos: return
+
+        # 2. Generación Batch
+        try:
+            # --- SOLUCIÓN AL ERROR CIRCULAR ---
+            # Verificamos que la función inyectada exista    
+            if not fn_generar_embeddings:
+                print("⚠️ No se pudo vectorizar: No se proporcionó 'fn_generar_embeddings'")
+            return
+
+            vectores = await generar_embeddings_batch([f['texto'] for f in nuevos])
+            
+            filas_finales = []
+            for fila, vector in zip(nuevos, vectores):
+                if vector:
+                    filas_finales.append({
+                        'correo_id': fila['correo_db_id'],
+                        'usuario_id': usuario_id,
+                        'remitente': fila['remitente'],
+                        'asunto': fila['asunto'],
+                        'texto_indexado': fila['texto'],
+                        'embedding': vector,
+                        'fecha_correo': fila.get('fecha'),
+                        'temas': fila['temas']
+                    })
+            
+            if filas_finales:
+                supabase_client.table('correos_vectores').upsert(filas_finales, on_conflict='correo_id').execute()
+                print(f"✅ [VECTORES GMAIL] {len(filas_finales)} correos indexados.")
+        except Exception as e:
+            print(f"❌ Error crítico en vectorización Gmail: {e}")
+
 
     # ================================================================
     # ORQUESTADOR PRINCIPAL
@@ -556,7 +737,8 @@ class AnalizadorCorreos:
         gemini_client,
         supabase_client,
         nombre_usuario: str = "",
-        cuenta_gmail_id: str = None  # 👈 ¡ESTA ES LA LÍNEA NUEVA QUE FALTABA!
+        cuenta_gmail_id: str = None,  # 👈 ¡ESTA ES LA LÍNEA NUEVA QUE FALTABA!
+        fn_generar_embeddings=None
     ) -> Dict:
         
         """
@@ -758,7 +940,13 @@ class AnalizadorCorreos:
             
             # Pasamos la lista estructurada a TU función
             # Pasamos la lista estructurada a TU función (AHORA CON SUPABASE)
-            resultados_profundos = await self.analizar_profundo(datos_para_profundo, gemini_client, supabase_client, usuario_id)            
+            resultados_profundos = await self.analizar_profundo(
+                datos_para_profundo, 
+                gemini_client, 
+                supabase_client, 
+                usuario_id,
+                fn_generar_embeddings=fn_generar_embeddings
+            )            
             # Guardado en BD (Tu lógica original intacta)
             for item in datos_para_profundo:
                 idx = item['id_correo']
@@ -919,116 +1107,116 @@ class AnalizadorCorreos:
                         except Exception as e_p: print(f"Error Push: {e_p}")
                 # ---------------------------------------------------------
 
-                        # CAMBIO 3: Actualizar perfil enriquecido del contacto
-                        # Se ejecuta con los datos que la IA ya generó — sin llamadas adicionales
-                        try:
-                            perfil_ia = res_prof.get('perfil_contacto', {})
-                            if perfil_ia:
-                                remitente_email = c_final.get('de', '')
-                                fecha_correo = c_final.get('fecha')
-                                
-                                # Leer perfil existente para hacer merge, no sobreescribir
-                                perfil_existente_res = supabase_client.table('perfiles_contactos_enriquecidos')\
-                                    .select('*')\
-                                    .eq('usuario_id', usuario_id)\
-                                    .eq('remitente', remitente_email)\
-                                    .limit(1).execute()
-                                
-                                perfil_existente = perfil_existente_res.data[0] if perfil_existente_res.data else {}
-                                
-                                # Merge acumulativo de temas (no reemplazar, acumular)
-                                temas_actuales = set(perfil_existente.get('temas_principales') or [])
-                                temas_nuevos = set(perfil_ia.get('temas_nuevos') or [])
-                                temas_merged = list(temas_actuales | temas_nuevos)[:20]  # máximo 20
-                                
-                                subtemas_actuales = set(perfil_existente.get('subtemas') or [])
-                                subtemas_nuevos = set(perfil_ia.get('subtemas_nuevos') or [])
-                                subtemas_merged = list(subtemas_actuales | subtemas_nuevos)[:30]
-                                
+                # CAMBIO 3: Actualizar perfil enriquecido del contacto
+                # Se ejecuta con los datos que la IA ya generó — sin llamadas adicionales
+                try:
+                    perfil_ia = res_prof.get('perfil_contacto', {})
+                    if perfil_ia:
+                        remitente_email = c_final.get('de', '')
+                        fecha_correo = c_final.get('fecha')
+                        
+                        # Leer perfil existente para hacer merge, no sobreescribir
+                        perfil_existente_res = supabase_client.table('perfiles_contactos_enriquecidos')\
+                            .select('*')\
+                            .eq('usuario_id', usuario_id)\
+                            .eq('remitente', remitente_email)\
+                            .limit(1).execute()
+                        
+                        perfil_existente = perfil_existente_res.data[0] if perfil_existente_res.data else {}
+                        
+                        # Merge acumulativo de temas (no reemplazar, acumular)
+                        temas_actuales = set(perfil_existente.get('temas_principales') or [])
+                        temas_nuevos = set(perfil_ia.get('temas_nuevos') or [])
+                        temas_merged = list(temas_actuales | temas_nuevos)[:20]  # máximo 20
+                        
+                        subtemas_actuales = set(perfil_existente.get('subtemas') or [])
+                        subtemas_nuevos = set(perfil_ia.get('subtemas_nuevos') or [])
+                        subtemas_merged = list(subtemas_actuales | subtemas_nuevos)[:30]
+                        
 
-                                # --- NUEVO: Merge de estilo/estrategia ---
-                                estilos_actuales = set(perfil_existente.get('estilo_negociacion') or [])
-                                estilo_nuevo = perfil_ia.get('estrategia_o_estilo')
-                                
-                                if estilo_nuevo and isinstance(estilo_nuevo, str):
-                                    # Limpiamos espacios y minúsculas para evitar duplicados por formato
-                                    estilos_actuales.add(estilo_nuevo.strip().lower())
-                                
-                                # Convertimos a lista y limitamos a los 10 rasgos más recientes
-                                estilos_merged = list(estilos_actuales)[-10:]
+                        # --- NUEVO: Merge de estilo/estrategia ---
+                        estilos_actuales = set(perfil_existente.get('estilo_negociacion') or [])
+                        estilo_nuevo = perfil_ia.get('estrategia_o_estilo')
+                        
+                        if estilo_nuevo and isinstance(estilo_nuevo, str):
+                            # Limpiamos espacios y minúsculas para evitar duplicados por formato
+                            estilos_actuales.add(estilo_nuevo.strip().lower())
+                        
+                        # Convertimos a lista y limitamos a los 10 rasgos más recientes
+                        estilos_merged = list(estilos_actuales)[-10:]
 
 
-                                # Actualizar contadores de resultados
-                                resultados = perfil_existente.get('resultados_interaccion') or \
-                                            {"exitos": 0, "problemas": 0, "pendientes": 0, "neutros": 0}
-                                resultado_actual = perfil_ia.get('resultado_esta_interaccion', 'neutro')
-                                if resultado_actual == 'exito':
-                                    resultados['exitos'] = resultados.get('exitos', 0) + 1
-                                elif resultado_actual == 'problema':
-                                    resultados['problemas'] = resultados.get('problemas', 0) + 1
-                                elif resultado_actual == 'pendiente':
-                                    resultados['pendientes'] = resultados.get('pendientes', 0) + 1
-                                else:
-                                    resultados['neutros'] = resultados.get('neutros', 0) + 1
-                                
-                                # Acumular incidencias (solo si hubo problema)
-                                incidencias = perfil_existente.get('incidencias') or []
-                                resumen_incidencia = perfil_ia.get('resumen_incidencia')
-                                if resumen_incidencia and resultado_actual == 'problema':
-                                    incidencias = incidencias[-9:]  # mantener solo las 9 más recientes
-                                    incidencias.append({
-                                        "fecha": str(fecha_correo)[:10] if fecha_correo else "desconocida",
-                                        "asunto": c_final.get('asunto', '')[:80],
-                                        "resumen": resumen_incidencia
-                                    })
-                                
-                                # Acumular ventas o acuerdos
-                                acuerdos = perfil_existente.get('ventas_o_acuerdos') or []
-                                resumen_acuerdo = perfil_ia.get('resumen_acuerdo')
-                                if resumen_acuerdo:
-                                    acuerdos = acuerdos[-9:]
-                                    acuerdos.append({
-                                        "fecha": str(fecha_correo)[:10] if fecha_correo else "desconocida",
-                                        "asunto": c_final.get('asunto', '')[:80],
-                                        "detalle": resumen_acuerdo
-                                    })
-                                
-                                # Preservar datos existentes si la IA no detectó nuevos
-                                # (no sobreescribir cargo conocido con null)
-                                datos_perfil = {
-                                    'usuario_id': usuario_id,
-                                    'remitente': remitente_email,
-                                    'nombre_detectado': perfil_ia.get('nombre_detectado') or 
-                                                        perfil_existente.get('nombre_detectado'),
-                                    'cargo_detectado': perfil_ia.get('cargo_detectado') or 
-                                                    perfil_existente.get('cargo_detectado'),
-                                    'empresa_detectada': perfil_ia.get('empresa_detectada') or 
-                                                        perfil_existente.get('empresa_detectada'),
-                                    'tipo_relacion': perfil_ia.get('tipo_relacion') or 
-                                                    perfil_existente.get('tipo_relacion') or 'desconocido',
-                                    'nivel_decision': perfil_ia.get('nivel_decision') or 
-                                                    perfil_existente.get('nivel_decision') or 'desconocido',
-                                    'temas_principales': temas_merged,
-                                    'subtemas': subtemas_merged,
-                                    'estilo_negociacion': estilos_merged,
-                                    'resultados_interaccion': resultados,
-                                    'incidencias': incidencias,
-                                    'ventas_o_acuerdos': acuerdos,
-                                    'ultimo_tono': res_prof.get('tono_detectado'),
-                                    'total_correos': (perfil_existente.get('total_correos') or 0) + 1,
-                                    'primer_contacto': perfil_existente.get('primer_contacto') or fecha_correo,
-                                    'ultimo_contacto': fecha_correo,
-                                    'requiere_seguimiento': resultado_actual in ('problema', 'pendiente'),
-                                    'updated_at': datetime.now().isoformat()
-                                }
-                                
-                                # Upsert: crea si no existe, actualiza si existe
-                                supabase_client.table('perfiles_contactos_enriquecidos')\
-                                    .upsert(datos_perfil, on_conflict='usuario_id, remitente')\
-                                    .execute()
-                                
-                        except Exception as e_perfil:
-                            print(f"⚠️ Error actualizando perfil enriquecido para {c_final.get('de', '')}: {e_perfil}")
+                        # Actualizar contadores de resultados
+                        resultados = perfil_existente.get('resultados_interaccion') or \
+                                    {"exitos": 0, "problemas": 0, "pendientes": 0, "neutros": 0}
+                        resultado_actual = perfil_ia.get('resultado_esta_interaccion', 'neutro')
+                        if resultado_actual == 'exito':
+                            resultados['exitos'] = resultados.get('exitos', 0) + 1
+                        elif resultado_actual == 'problema':
+                            resultados['problemas'] = resultados.get('problemas', 0) + 1
+                        elif resultado_actual == 'pendiente':
+                            resultados['pendientes'] = resultados.get('pendientes', 0) + 1
+                        else:
+                            resultados['neutros'] = resultados.get('neutros', 0) + 1
+                        
+                        # Acumular incidencias (solo si hubo problema)
+                        incidencias = perfil_existente.get('incidencias') or []
+                        resumen_incidencia = perfil_ia.get('resumen_incidencia')
+                        if resumen_incidencia and resultado_actual == 'problema':
+                            incidencias = incidencias[-9:]  # mantener solo las 9 más recientes
+                            incidencias.append({
+                                "fecha": str(fecha_correo)[:10] if fecha_correo else "desconocida",
+                                "asunto": c_final.get('asunto', '')[:80],
+                                "resumen": resumen_incidencia
+                            })
+                        
+                        # Acumular ventas o acuerdos
+                        acuerdos = perfil_existente.get('ventas_o_acuerdos') or []
+                        resumen_acuerdo = perfil_ia.get('resumen_acuerdo')
+                        if resumen_acuerdo:
+                            acuerdos = acuerdos[-9:]
+                            acuerdos.append({
+                                "fecha": str(fecha_correo)[:10] if fecha_correo else "desconocida",
+                                "asunto": c_final.get('asunto', '')[:80],
+                                "detalle": resumen_acuerdo
+                            })
+                        
+                        # Preservar datos existentes si la IA no detectó nuevos
+                        # (no sobreescribir cargo conocido con null)
+                        datos_perfil = {
+                            'usuario_id': usuario_id,
+                            'remitente': remitente_email,
+                            'nombre_detectado': perfil_ia.get('nombre_detectado') or 
+                                                perfil_existente.get('nombre_detectado'),
+                            'cargo_detectado': perfil_ia.get('cargo_detectado') or 
+                                            perfil_existente.get('cargo_detectado'),
+                            'empresa_detectada': perfil_ia.get('empresa_detectada') or 
+                                                perfil_existente.get('empresa_detectada'),
+                            'tipo_relacion': perfil_ia.get('tipo_relacion') or 
+                                            perfil_existente.get('tipo_relacion') or 'desconocido',
+                            'nivel_decision': perfil_ia.get('nivel_decision') or 
+                                            perfil_existente.get('nivel_decision') or 'desconocido',
+                            'temas_principales': temas_merged,
+                            'subtemas': subtemas_merged,
+                            'estilo_negociacion': estilos_merged,
+                            'resultados_interaccion': resultados,
+                            'incidencias': incidencias,
+                            'ventas_o_acuerdos': acuerdos,
+                            'ultimo_tono': res_prof.get('tono_detectado'),
+                            'total_correos': (perfil_existente.get('total_correos') or 0) + 1,
+                            'primer_contacto': perfil_existente.get('primer_contacto') or fecha_correo,
+                            'ultimo_contacto': fecha_correo,
+                            'requiere_seguimiento': resultado_actual in ('problema', 'pendiente'),
+                            'updated_at': datetime.now().isoformat()
+                        }
+                        
+                        # Upsert: crea si no existe, actualiza si existe
+                        supabase_client.table('perfiles_contactos_enriquecidos')\
+                            .upsert(datos_perfil, on_conflict='usuario_id, remitente')\
+                            .execute()
+                        
+                except Exception as e_perfil:
+                    print(f"⚠️ Error actualizando perfil enriquecido para {c_final.get('de', '')}: {e_perfil}")
 
                 estadisticas['accion_alta'] += 1
                 correos_criticos.append({'correo': c_final, 'analisis': res_prof, 'clasificacion': c_final})
@@ -1134,7 +1322,7 @@ async def analizar_historial_gmail_optimizado(
                 # Calcular frecuencia
                 fechas = [c.get('fecha') for c in lista_correos if c.get('fecha')]
                 if len(fechas) > 1:
-                    from datetime import datetime
+                    
                     try:
                         primera = datetime.fromisoformat(fechas[-1].replace('Z', '+00:00'))
                         ultima = datetime.fromisoformat(fechas[0].replace('Z', '+00:00'))
@@ -1209,7 +1397,7 @@ Responde JSON:
                     )
                 )
                 
-                import json
+                
                 perfil_ia = json.loads(response.text)
                 llamadas_ia += 1
 
