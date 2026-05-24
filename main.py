@@ -2253,7 +2253,8 @@ async def generar_embedding(texto: str):
                 # Llamada corregida para google-genai SDK
                 result = gemini_client.models.embed_content(
                     model=modelo_actual,
-                    contents=texto_limpio
+                    contents=texto_limpio,
+                    config={"output_dimensionality": 768}
                 )
                 
                 # Validación de respuesta
