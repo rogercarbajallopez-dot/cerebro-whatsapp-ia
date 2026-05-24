@@ -1981,7 +1981,8 @@ async def generar_embeddings_batch(textos: list):
             try:
                 result = gemini_client.models.embed_content(
                     model=modelo,
-                    contents=sub_lote
+                    contents=sub_lote,
+                    config={"output_dimensionality": 800}
                 )
                 
                 if result.embeddings:
