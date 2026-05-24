@@ -243,14 +243,16 @@ async def detectar_patrones_temporales(supabase, usuario_id: str):
 # 2. DETECCIÓN INCREMENTAL DIARIA (sin IA, desde alertas ya extraídas)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def procesar_patrones_incrementales(supabase, usuario_id: str):
     """
     Corre 1 vez/día. Lee alertas tipo tarea_ia de las últimas 24h.
     El cerebro ya extrajo las intenciones — no se llama a Gemini aquí.
-    Actualiza patron_temporal con lógica Python pura.
+    Actualiza patron_temporal con lógica Python pura y previene errores de duplicados.
     """
     print(f"[patron_engine] Incremental para {usuario_id}...")
     try:
+        # Ajusta ZONA a la variable que usas en tu archivo, o usa una zona por defecto si no está global
         hace_24h = (datetime.now(ZONA) - timedelta(hours=24)).isoformat()
         res = supabase.table('alertas')\
             .select('titulo, descripcion, metadata, created_at')\
@@ -288,7 +290,6 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
                 dt_tarea = datetime.now(ZONA)
 
             # Usar fecha_limite si existe: es la fecha REAL del evento (ej. fin de mes)
-            # El cerebro la pone cuando extrae tareas con fecha específica
             dt_evento = dt_tarea
             fecha_limite_raw = t.get('fecha_limite') or meta.get('fecha_limite')
             if fecha_limite_raw:
@@ -320,9 +321,20 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
 
             for tarea in tareas:
                 hubo_match = False
+                
+                # Capa 1: Limpieza básica para evitar falsos negativos en tu función
+                desc_tarea_limpia = tarea['intencion_normalizada'].strip().lower()
 
                 for patron in patrones:
-                    ev = evaluar_coincidencia_dinamica(tarea, patron)
+                    desc_patron_limpia = patron['descripcion'].strip().lower()
+                    
+                    # Verificación directa primero
+                    if desc_tarea_limpia == desc_patron_limpia:
+                        ev = {'match': True, 'tipo': 'exacto'}
+                    else:
+                        # Si no es exacto, llamamos a tu función de coincidencia dinámica
+                        ev = evaluar_coincidencia_dinamica(tarea, patron)
+                        
                     if not ev['match']:
                         continue
 
@@ -361,6 +373,7 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
                         'ocurrencias': nuevas_ocurrencias,
                         'nueva_hora': nueva_hora_tipica,
                     })
+                    
                     # Actualizar objeto local para siguiente iteración
                     patron['ocurrencias']   = nuevas_ocurrencias
                     patron['hora_tipica']   = nueva_hora_tipica
@@ -384,9 +397,22 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
                         'ultima_ocurrencia':    tarea['dt'].isoformat(),
                         'updated_at':           datetime.now(ZONA).isoformat(),
                     }
-                    supabase.table('patron_temporal').insert(nuevo).execute()
-                    patrones.append(nuevo)
-                    log.append({'accion': 'nuevo', 'descripcion': tarea['intencion_normalizada']})
+                    
+                    # Capa 2: Manejo de Upsert / Colisiones usando el nombre exacto de la restricción única
+                    try:
+                        supabase.table('patron_temporal').upsert(
+                            nuevo, 
+                            on_conflict='idx_patron_temporal_unico'
+                        ).execute()
+                        
+                        patrones.append(nuevo)
+                        log.append({'accion': 'nuevo', 'descripcion': tarea['intencion_normalizada']})
+                        
+                    except Exception as e:
+                        if "23505" in str(e):
+                            print(f"⚠️ Colisión evitada (23505). El patrón '{tarea['intencion_normalizada']}' ya existe en BD pero no fue cargado/matcheado correctamente. Se ignora la inserción.")
+                        else:
+                            raise e # Re-lanzar si es otro tipo de error
 
         print(f"[patron_engine] Incremental: {len(log)} eventos procesados")
         return {"status": "success", "procesadas": len(log), "detalle": log}
