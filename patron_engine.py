@@ -122,7 +122,7 @@ def evaluar_coincidencia_dinamica(nueva_tarea: dict, patron: dict) -> dict:
     if intencion_nueva == intencion_patron and intencion_nueva in SINONIMOS:
         sim = 1.0
     
-    if sim < 0.60:
+    if sim < 0.90:
         return {"match": False, "razon": f"similitud={sim:.2f} < 0.60"}
 
     hora_nueva    = nueva_tarea.get("hora_evento")
@@ -134,7 +134,7 @@ def evaluar_coincidencia_dinamica(nueva_tarea: dict, patron: dict) -> dict:
     # ── FILTRO 2A: evento con hora específica ─────────────────────────────────
     if hora_nueva and patron_hora:
         diff = diferencia_horas(hora_nueva, patron_hora)
-        if diff <= 4.0:
+        if diff <= 1.5:
             return {"match": True, "tipo": "hora_flexible",
                     "similitud": sim, "diff_horas": diff}
         else:
@@ -210,7 +210,7 @@ async def detectar_patrones_temporales(supabase, usuario_id: str):
         for (ancla, hora, dia), eventos in {**grupos_wa, **grupos_email}.items():
             canal = 'whatsapp' if (ancla, hora, dia) in grupos_wa else 'email'
             n = len(eventos)
-            if n < 3:
+            if n < 7:
                 continue
             descripcion = f"Conversacion frecuente con {ancla} los {DIA[dia]} a las {hora:02d}:xx hrs"
             ultima = max(e['fecha'] for e in eventos)
@@ -228,7 +228,7 @@ async def detectar_patrones_temporales(supabase, usuario_id: str):
                 'confianza':            confianza_por_ocurrencias(n),
                 'ultima_ocurrencia':    ultima.isoformat(),
                 'updated_at':           datetime.now(ZONA).isoformat(),
-            }, on_conflict='usuario_id, numero_telefonico, canal, md5(descripcion)').execute()
+            }, on_conflict='usuario_id, numero_telefonico, canal, descripcion').execute()
             guardados.append({'ancla': ancla, 'hora': hora, 'dia': DIA[dia], 'n': n})
 
         print(f"[patron_engine] Batch: {len(guardados)} patrones guardados")
@@ -402,7 +402,8 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
                     try:
                         supabase.table('patron_temporal').upsert(
                             nuevo, 
-                            on_conflict='idx_patron_temporal_unico'
+                            # Asegúrate de que estas sean exactamente las columnas de tu Unique Constraint en BD
+                            on_conflict='usuario_id, numero_telefonico, canal, md5(descripcion)' 
                         ).execute()
                         
                         patrones.append(nuevo)
