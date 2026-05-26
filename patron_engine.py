@@ -403,7 +403,7 @@ async def procesar_patrones_incrementales(supabase, usuario_id: str):
                         supabase.table('patron_temporal').upsert(
                             nuevo, 
                             # Asegúrate de que estas sean exactamente las columnas de tu Unique Constraint en BD
-                            on_conflict='usuario_id, numero_telefonico, canal, md5(descripcion)' 
+                            on_conflict='constraint_patron_temporal_unico' 
                         ).execute()
                         
                         patrones.append(nuevo)
