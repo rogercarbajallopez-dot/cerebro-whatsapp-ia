@@ -738,7 +738,9 @@ class AnalizadorCorreos:
         supabase_client,
         nombre_usuario: str = "",
         cuenta_gmail_id: str = None,  # 👈 ¡ESTA ES LA LÍNEA NUEVA QUE FALTABA!
-        fn_generar_embeddings=None
+        fn_generar_embeddings=None,
+        fn_actualizar_perfil=None,  # 👈 1. AÑADIMOS EL PARÁMETRO FALTANTE PARA EVITAR EL CRASH
+        **kwargs # 🛡️ 2. BLINDAJE ENTERPRISE: Absorbe cualquier otro parámetro "fantasma" futuro
     ) -> Dict:
         
         """
