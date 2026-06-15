@@ -2254,7 +2254,7 @@ async def generar_embedding(texto: str):
                 result = gemini_client.models.embed_content(
                     model=modelo_actual,
                     contents=texto_limpio,
-                    config={"output_dimensionality": 768}
+                    config={"output_dimensionality": 800}
                 )
                 
                 # Validación de respuesta
